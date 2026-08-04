@@ -1,0 +1,53 @@
+# =============================================================================
+# GitHub Pages 자동 배포
+# -----------------------------------------------------------------------------
+# 기본 브랜치(claude/bestone-japan-travel-app-w9jyou)에 파일이 push 될 때마다
+# 저장소 내용을 그대로 GitHub Pages 에 올립니다.
+# 빌드 과정이 없는 정적 사이트이므로 파일을 복사해서 배포만 합니다.
+#
+# ★ 이 워크플로가 동작하려면 저장소 설정에서 Pages 의 Source 가
+#   "GitHub Actions" 로 되어 있어야 합니다.
+#   (Settings → Pages → Build and deployment → Source → GitHub Actions)
+#
+# ★ 나중에 기본 브랜치를 main 등으로 바꾸셨다면 아래 branches 값도 함께 바꿔주세요.
+# =============================================================================
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [claude/bestone-japan-travel-app-w9jyou, main]
+  # Actions 탭 → 이 워크플로 → Run workflow 버튼으로 수동 실행도 가능합니다.
+  workflow_dispatch:
+
+# 같은 배포가 겹치지 않도록 이전 배포를 취소합니다.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: Pages 배포 환경 설정
+        uses: actions/configure-pages@v5
+
+      - name: 배포할 파일 묶기
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # 저장소 루트 전체를 그대로 배포합니다 (별도 빌드 없음).
+          path: '.'
+
+      - name: GitHub Pages 에 배포
+        id: deployment
+        uses: actions/deploy-pages@v4

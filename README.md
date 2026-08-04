@@ -548,19 +548,37 @@ git push
 
 #### 8-3. GitHub Pages 켜기
 
+이 저장소에는 `.github/workflows/deploy-pages.yml` 이 이미 들어 있어서,
+**Source 를 `GitHub Actions` 로 선택**하면 push 할 때마다 자동으로 배포됩니다.
+(`Deploy from a branch` 방식을 쓰고 싶다면 아래 "방법 B" 를 참고하세요)
+
+**방법 A · GitHub Actions 로 자동 배포 (권장)**
+
 1. 저장소 상단 메뉴에서 **`Settings`** 를 누릅니다.
 2. 왼쪽 메뉴에서 **`Pages`** 를 누릅니다.
-3. **`Build and deployment`** 항목에서
-   * **Source** : `Deploy from a branch`
-   * **Branch** : `main` (또는 현재 브랜치) / 폴더는 `/ (root)`
-4. **`Save`** 를 누릅니다.
-5. 1~2분 기다린 뒤 같은 페이지를 새로고침하면 주소가 나옵니다.
+3. **`Build and deployment`** 항목에서 **Source** 를 **`GitHub Actions`** 로 선택합니다.
+   (드롭다운을 열면 "GitHub Actions" 항목이 보입니다. 별도로 브랜치나 폴더를 고를 필요는 없습니다)
+4. 저장소 위쪽 **`Actions`** 탭을 누릅니다.
+5. **`Deploy to GitHub Pages`** 워크플로가 보이면 눌러서 오른쪽의 **`Run workflow`** 버튼으로 한 번 실행합니다.
+   (이미 push 가 되어 있었다면 자동으로 한 번 실행되어 있을 수도 있습니다)
+6. 초록색 체크(✅)로 완료되면, 다시 **`Settings → Pages`** 로 돌아가 주소를 확인합니다.
 
 ```
 Your site is live at https://사용자이름.github.io/bestonejapan/
 ```
 
-6. 스마트폰에서 이 주소를 열어 보세요.
+7. 스마트폰에서 이 주소를 열어 보세요.
+
+> 이후로는 `git push` 로 코드를 올릴 때마다(또는 GitHub 웹에서 파일을 수정해 커밋할 때마다)
+> **`Actions` 탭에 새 실행이 자동으로 생기고, 1~2분 뒤 사이트에 반영**됩니다.
+> 따로 `Save` 버튼을 누르거나 배포 브랜치를 선택할 필요가 없습니다.
+
+**방법 B · 브랜치에서 바로 배포 (더 단순하지만 워크플로 파일은 쓰이지 않음)**
+
+1. **`Settings → Pages → Build and deployment`** 에서 **Source** 를 **`Deploy from a branch`** 로 선택합니다.
+2. **Branch** 를 저장소의 기본 브랜치로, 폴더는 **`/ (root)`** 로 선택하고 **`Save`** 를 누릅니다.
+3. 이 방법을 쓰면 `.github/workflows/deploy-pages.yml` 은 실행되지 않아도 무방합니다.
+   (Actions 탭에 매번 배포 실행이 남는 게 번거롭다면 이 방법을 선택하세요)
 
 #### 8-4. 스마트폰에 앱으로 설치하기 (PWA)
 
@@ -706,6 +724,27 @@ Apps Script 에서 **`checkSetup`** 함수를 실행하세요.
 * 회사·학교 계정은 "링크가 있는 모든 사용자에게 공개"가 정책상 막혀 있을 수 있습니다.
   이 경우 사진은 저장되지만 앱에서 미리보기가 안 보일 수 있습니다.
   → 개인 Gmail 계정으로 만드는 것을 권장합니다.
+</details>
+
+<details>
+<summary><b>GitHub Actions 는 도는데 Pages 배포가 안 됨 / Actions 탭이 비어 있음</b></summary>
+
+1. **`Settings → Pages → Build and deployment → Source`** 가 **`GitHub Actions`** 로
+   되어 있는지 확인하세요. `Deploy from a branch` 로 되어 있으면
+   이 저장소의 `.github/workflows/deploy-pages.yml` 워크플로는 실행되지만
+   **실제 배포에는 쓰이지 않습니다.** (8-3단계의 "방법 A" 참고)
+2. 저장소 위쪽 **`Actions`** 탭을 열어 **`Deploy to GitHub Pages`** 워크플로가 보이는지 확인하세요.
+   보이지 않으면 `.github/workflows/deploy-pages.yml` 파일이 기본 브랜치에
+   올라가 있는지 확인하세요. (다른 브랜치에만 있으면 Actions 가 인식하지 못합니다)
+3. 워크플로는 있는데 실행 기록이 없다면, 그 워크플로를 열고 오른쪽의
+   **`Run workflow`** 버튼으로 수동 실행해 보세요.
+4. 실행이 **빨간 X(실패)** 로 끝났다면 그 실행을 눌러 로그를 확인하세요.
+   `Get Pages site failed` 같은 메시지가 보이면 1번(Source 설정)이 원인인 경우가 대부분입니다.
+5. 저장소가 **Private** 라면 GitHub Pages 는 무료 요금제에서도 동작하지만,
+   조직 계정의 정책에 따라 Pages 자체가 막혀 있을 수 있습니다.
+   `Settings → Pages` 화면에 안내 문구가 있는지 확인하세요.
+6. 워크플로 파일의 `on: push: branches:` 에 적힌 이름이 실제 기본 브랜치 이름과
+   같은지 확인하세요. 브랜치 이름을 바꿨다면 워크플로 파일도 함께 고쳐야 합니다.
 </details>
 
 <details>
