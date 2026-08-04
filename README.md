@@ -61,6 +61,10 @@ bestonejapan/
 │   ├── icon-192.png
 │   ├── icon-512.png
 │   └── icon-maskable-512.png
+├── assets/
+│   └── img/
+│       ├── login-hero.webp   로그인 화면 메인 일러스트
+│       └── login-hero.jpg    위 이미지의 JPEG 대체본(webp 미지원 브라우저용)
 ├── Code.gs               ★ Google Apps Script 에 붙여 넣을 백엔드 전체 코드
 └── README.md             이 문서
 ```
@@ -941,11 +945,16 @@ function todayJst_() {
 
 ## 삽화에 대해
 
-앱의 그림(로그인 화면의 사막·별·달·작은 여행자, 아이콘)은
-《어린 왕자》의 모티프에서 영감을 받아 **이 프로젝트를 위해 새로 그린 SVG·PNG 그림**입니다.
-원작 삽화는 나라에 따라 아직 저작권이 남아 있어 그대로 사용하지 않았습니다.
-직접 구한 이미지를 쓰고 싶다면 `icons/` 폴더의 파일을 교체하거나
-`index.html` 의 `<svg class="login-art">` 부분을 `<img>` 태그로 바꾸면 됩니다.
+로그인 화면의 메인 일러스트(`assets/img/login-hero.webp` / `.jpg`)는
+《어린 왕자》의 모티프 — 별이 빛나는 사막 행성, 지도를 든 작은 여행자,
+여행 모자를 쓴 코끼리, 로켓과 행성, 이정표 — 에서 영감을 받아
+**이 프로젝트를 위해 준비한 그림**입니다. 앱 아이콘(`icons/` 폴더)은
+같은 콘셉트를 코드로 그린 SVG·PNG 그림입니다.
+
+다른 그림으로 바꾸고 싶다면 `assets/img/login-hero.webp` 와 `login-hero.jpg` 파일을
+같은 이름으로 교체하면 됩니다. (권장 크기: 가로 1600px 내외, 가로가 세로보다 넓은 사진일수록
+`index.html` 의 `<img class="login-art">` 가 화면 폭에 맞춰 예쁘게 잘립니다)
+아이콘을 바꾸려면 `icons/` 폴더의 파일을 같은 이름·크기로 교체하세요.
 
 ---
 

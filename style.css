@@ -165,21 +165,20 @@ a { color: var(--sky-deep); }
   overflow-y: auto;
   z-index: 60;
 }
-.login-sky { position: relative; height: 44vh; min-height: 240px; flex: none; }
-.login-sky .stars {
-  position: absolute; inset: 0;
-  background-image:
-    radial-gradient(1.6px 1.6px at 12% 22%, #fff8dd 50%, transparent 51%),
-    radial-gradient(1.2px 1.2px at 28% 12%, #ffeeb8 50%, transparent 51%),
-    radial-gradient(1.8px 1.8px at 62% 18%, #fff8dd 50%, transparent 51%),
-    radial-gradient(1.2px 1.2px at 78% 32%, #ffeeb8 50%, transparent 51%),
-    radial-gradient(1.4px 1.4px at 45% 36%, #fff8dd 50%, transparent 51%),
-    radial-gradient(1.1px 1.1px at 88% 12%, #ffeeb8 50%, transparent 51%),
-    radial-gradient(1.3px 1.3px at 8% 48%, #fff8dd 50%, transparent 51%);
-  animation: twinkle 5s ease-in-out infinite alternate;
+.login-sky {
+  position: relative; height: 44vh; min-height: 240px; max-height: 420px; flex: none;
+  overflow: hidden;
 }
-@keyframes twinkle { from { opacity: .55; } to { opacity: 1; } }
-.login-art { position: absolute; inset: 0; width: 100%; height: 100%; }
+.login-sky::after {
+  /* 일러스트 아래쪽을 로그인 카드 배경(--bg)과 자연스럽게 이어줍니다 */
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 40%;
+  background: linear-gradient(180deg, rgba(16,26,47,0) 0%, rgba(16,26,47,.55) 78%, var(--bg) 100%);
+  pointer-events: none;
+}
+.login-art {
+  display: block; width: 100%; height: 100%;
+  object-fit: cover; object-position: 50% 58%;
+}
 
 .login-card {
   flex: 1;

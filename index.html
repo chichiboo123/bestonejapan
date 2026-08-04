@@ -29,52 +29,12 @@
 ========================================================= -->
 <div id="loginScreen" class="login-screen" role="main" aria-label="로그인">
   <div class="login-sky" aria-hidden="true">
-    <div class="stars"></div>
-    <svg class="login-art" viewBox="0 0 400 260" role="img" aria-label="사막 위의 작은 여행자와 코끼리를 품은 언덕">
-      <defs>
-        <linearGradient id="duneG" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#e8d3a9" />
-          <stop offset="100%" stop-color="#c9ab77" />
-        </linearGradient>
-        <linearGradient id="duneG2" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#d8bd8e" />
-          <stop offset="100%" stop-color="#b2915e" />
-        </linearGradient>
-      </defs>
-      <!-- 달 -->
-      <circle cx="330" cy="52" r="24" fill="#f6e3a1" opacity="0.95" />
-      <circle cx="321" cy="46" r="20" fill="#1b2a4a" />
-      <!-- 별자리 -->
-      <g stroke="#f2c14e" stroke-width="1" opacity="0.75" fill="none">
-        <polyline points="40,40 66,26 96,44 124,30" />
-      </g>
-      <g fill="#f6e3a1">
-        <circle cx="40" cy="40" r="2.6" /><circle cx="66" cy="26" r="2" />
-        <circle cx="96" cy="44" r="2.6" /><circle cx="124" cy="30" r="2" />
-        <circle cx="190" cy="34" r="1.8" /><circle cx="240" cy="70" r="1.6" />
-        <circle cx="150" cy="80" r="1.4" /><circle cx="280" cy="26" r="1.6" />
-      </g>
-      <!-- 비행기 -->
-      <g transform="translate(232,104) rotate(-12)" fill="#f4efe2" opacity="0.9">
-        <path d="M0 0 L26 4 L34 0 L26 -4 Z" />
-        <path d="M12 2 L6 12 L10 12 L18 3 Z" />
-        <path d="M12 -2 L6 -12 L10 -12 L18 -3 Z" />
-      </g>
-      <!-- 사막 언덕 (코끼리를 삼킨 보아뱀 실루엣) -->
-      <path d="M0 260 L0 214 C40 214 60 210 84 198 C104 188 118 156 148 156 C178 156 190 188 212 198 C236 210 262 214 400 214 L400 260 Z"
-            fill="url(#duneG)" />
-      <path d="M0 260 L0 238 C70 238 110 232 168 226 C230 220 300 232 400 230 L400 260 Z"
-            fill="url(#duneG2)" opacity="0.9" />
-      <!-- 작은 여행자 + 여행 가방 -->
-      <g transform="translate(300,196)" fill="#2b3a5c">
-        <circle cx="0" cy="-22" r="6" />
-        <path d="M-5 -16 L5 -16 L7 -2 L-7 -2 Z" />
-        <path d="M-7 -2 L-4 12 L-1 12 L-2 -2 Z" />
-        <path d="M7 -2 L4 12 L1 12 L2 -2 Z" />
-        <rect x="8" y="0" width="12" height="9" rx="1.5" />
-        <path d="M11 0 v-3 h6 v3" fill="none" stroke="#2b3a5c" stroke-width="1.6" />
-      </g>
-    </svg>
+    <picture>
+      <source srcset="assets/img/login-hero.webp" type="image/webp" />
+      <img class="login-art" src="assets/img/login-hero.jpg"
+           alt="별이 빛나는 사막 행성에서 지도를 든 작은 여행자가 여행 모자를 쓴 코끼리와 함께 이정표 앞에 서 있는 모습"
+           loading="eager" decoding="async" />
+    </picture>
   </div>
 
   <div class="login-card">

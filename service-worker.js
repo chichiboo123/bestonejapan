@@ -8,7 +8,7 @@
  *   그러면 브라우저가 새 파일을 다시 받아옵니다.
  * ========================================================================= */
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const SHELL_CACHE = 'bestone-shell-' + CACHE_VERSION;
 const DATA_CACHE  = 'bestone-media-' + CACHE_VERSION;
 
@@ -22,7 +22,9 @@ const SHELL_FILES = [
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/icon-maskable-512.png'
+  './icons/icon-maskable-512.png',
+  './assets/img/login-hero.webp',
+  './assets/img/login-hero.jpg'
 ];
 
 /* ---------- 설치 ---------- */
