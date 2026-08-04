@@ -25,7 +25,12 @@ const S = {
   bookingTab: 'flight',
   localTab: 'phrase',
   recordTab: 'day',
-  filters: { phraseCat: 'all', phraseFav: false, phraseQ: '', wordCat: 'all', wordFav: false, wordQ: '', bookingType: 'all' },
+  filters: {
+    phraseCat: 'all', phraseFav: false, phraseQ: '',
+    wordCat: 'all', wordFav: false, wordQ: '',
+    bookingType: 'all', bookingQ: '',
+    stationQ: '', busQ: '', routeQ: '', scheduleQ: ''
+  },
   lastSync: null,
   loading: false,
   booted: false
@@ -1964,6 +1969,37 @@ function renderSchedule() {
   const date = S.scheduleDate;
   const nodes = [];
 
+  nodes.push(searchBox('일정 검색 (제목 · 장소 · 설명)', S.filters.scheduleQ, v => { S.filters.scheduleQ = v; renderSchedule(); }));
+
+  const sq = normQ(S.filters.scheduleQ);
+  if (sq) {
+    // 검색 중에는 날짜와 상관없이 전체 일정에서 찾습니다.
+    const found = S.schedules
+      .filter(x => matchQ(sq, [x.title, x.place, x.description, x.prepare, x.transport, catInfo(x.category).label]))
+      .sort(sortByDateTime);
+    nodes.push(h('div', { class: 'section-head' }, [
+      h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '검색 결과 ' + found.length + '건']),
+      h('button', { class: 'btn btn-sm btn-ghost', text: '검색 지우기', onclick: () => { S.filters.scheduleQ = ''; renderSchedule(); } })
+    ]));
+    if (found.length) {
+      let lastDate = '';
+      const wrap = h('div');
+      found.forEach(x => {
+        if (x.date !== lastDate) {
+          lastDate = x.date;
+          wrap.appendChild(h('div', { class: 'faint tiny', style: 'margin:12px 2px 4px;font-weight:700', text: fmtDateFull(x.date) }));
+        }
+        wrap.appendChild(renderTimeline([x]));
+      });
+      nodes.push(wrap);
+    } else {
+      nodes.push(emptyBox('검색 결과가 없습니다', '다른 낱말로 찾아보세요.', '🔍'));
+    }
+    mount(view, nodes.filter(Boolean));
+    view.appendChild(h('button', { class: 'fab', 'aria-label': '일정 추가', text: '＋', onclick: () => openEntityForm('schedule', null, { date: date }) }));
+    return;
+  }
+
   nodes.push(renderDateStrip(date, d => { S.scheduleDate = d; renderSchedule(); }));
 
   nodes.push(h('div', { class: 'section-head' }, [
@@ -2190,13 +2226,17 @@ function renderBooking() {
     }));
   });
   nodes.push(bar);
+  nodes.push(searchBox('예약 검색 (이름 · 장소 · 예약 번호)', S.filters.bookingQ, v => { S.filters.bookingQ = v; renderBooking(); }));
+  const bq = normQ(S.filters.bookingQ);
 
   if (S.bookingTab === 'flight') {
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '항공 정보']),
       h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('flight') })
     ]));
-    const list = S.flights.slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const list = S.flights.slice()
+      .filter(f => matchQ(bq, [f.flightNo, f.airline, f.depAirport, f.arrAirport, f.bookingNumber, f.seat, f.memo]))
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
     if (list.length) list.forEach(f => nodes.push(flightCard(f)));
     else nodes.push(emptyBox('등록된 항공편이 없습니다', '＋ 추가 버튼으로 항공 정보를 등록해 주세요.\n등록하면 날짜별 일정에도 자동으로 표시됩니다.', '✈️'));
 
@@ -2205,7 +2245,9 @@ function renderBooking() {
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '숙소 정보']),
       h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('accommodation') })
     ]));
-    const list = S.accommodations.slice().sort((a, b) => String(a.checkInDate).localeCompare(String(b.checkInDate)));
+    const list = S.accommodations.slice()
+      .filter(a => matchQ(bq, [a.name, a.nameJa, a.address, a.addressJa, a.nearestStation, a.bookingNumber, a.memo]))
+      .sort((a, b) => String(a.checkInDate).localeCompare(String(b.checkInDate)));
     if (list.length) list.forEach(a => nodes.push(accommodationCard(a, false)));
     else nodes.push(emptyBox('등록된 숙소가 없습니다', '체크인·체크아웃 시각과 일본어 주소를 넣어 두면 현지에서 편합니다.', '🛏️'));
 
@@ -2223,7 +2265,9 @@ function renderBooking() {
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '예약 · 티켓']),
       h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('reservation') })
     ]));
-    let list = S.reservations.slice().sort(sortByDateTime);
+    let list = S.reservations.slice()
+      .filter(r => matchQ(bq, [r.title, r.place, r.meetingPoint, r.bookingNumber, r.memo, r.prepare]))
+      .sort(sortByDateTime);
     if (S.filters.bookingType !== 'all') list = list.filter(r => r.type === S.filters.bookingType);
     if (list.length) list.forEach(r => nodes.push(reservationCard(r, false)));
     else nodes.push(emptyBox('등록된 예약이 없습니다', '관광·투어·공연·경기·열차·음식점 예약을 모아 둘 수 있습니다.', '🎟️'));
@@ -2440,7 +2484,7 @@ function renderLocal() {
     let list = S.japanesePhrases.slice();
     if (S.filters.phraseCat !== 'all') list = list.filter(p => p.category === S.filters.phraseCat);
     if (S.filters.phraseFav) list = list.filter(p => truthy(p.favorite));
-    if (q) list = list.filter(p => (String(p.ko) + String(p.ja) + String(p.reading)).toLowerCase().indexOf(q) >= 0);
+    if (q) list = list.filter(p => matchQ(normQ(q), [p.ko, p.ja, p.reading, p.memo]));
     list.sort((a, b) => (Number(a.sortOrder) || 999) - (Number(b.sortOrder) || 999));
 
     nodes.push(h('div', { class: 'section-head' }, [
@@ -2469,7 +2513,7 @@ function renderLocal() {
     let list = S.japaneseWords.slice();
     if (S.filters.wordCat !== 'all') list = list.filter(w => w.category === S.filters.wordCat);
     if (S.filters.wordFav) list = list.filter(w => truthy(w.favorite));
-    if (q) list = list.filter(w => (String(w.ko) + String(w.ja) + String(w.reading)).toLowerCase().indexOf(q) >= 0);
+    if (q) list = list.filter(w => matchQ(normQ(q), [w.ko, w.ja, w.reading, w.memo]));
     list.sort((a, b) => (Number(a.sortOrder) || 999) - (Number(b.sortOrder) || 999));
 
     nodes.push(h('div', { class: 'section-head' }, [
@@ -2486,29 +2530,40 @@ function renderLocal() {
     }
 
   } else if (S.localTab === 'station') {
+    nodes.push(searchBox('역 검색 (한글 · 일본어 · 노선 · 도시)', S.filters.stationQ, v => { S.filters.stationQ = v; renderLocal(); }));
+    const stq = normQ(S.filters.stationQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '저장한 역']),
       h('button', { class: 'btn btn-sm', text: '＋ 역 추가', onclick: () => openEntityForm('station') })
     ]));
-    const list = S.stations.slice().sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
+    const list = S.stations.slice()
+      .filter(st => matchQ(stq, [st.nameKo, st.nameJa, st.nameEn, st.lines, st.city, st.nearby, st.recommendedExit, st.memo]))
+      .sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
     if (list.length) list.forEach(st => nodes.push(stationCard(st)));
     else nodes.push(emptyBox('저장된 역이 없습니다', '여행에 필요한 역만 골라 저장해 두면 현지에서 빠르게 확인할 수 있습니다.', '🚉'));
     nodes.push(externalLinkCard());
 
   } else if (S.localTab === 'bus') {
+    nodes.push(searchBox('버스 검색 (노선 · 정류장 · 회사)', S.filters.busQ, v => { S.filters.busQ = v; renderLocal(); }));
+    const bsq = normQ(S.filters.busQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '버스 정보']),
       h('button', { class: 'btn btn-sm', text: '＋ 버스 추가', onclick: () => openEntityForm('bus') })
     ]));
-    if (S.buses.length) S.buses.forEach(b => nodes.push(busCard(b)));
+    const buses = S.buses.filter(b => matchQ(bsq, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]));
+    if (buses.length) buses.forEach(b => nodes.push(busCard(b)));
     else nodes.push(emptyBox('저장된 버스 정보가 없습니다', '지역마다 타는 방법이 다릅니다. 미리 적어 두면 든든합니다.', '🚌'));
 
   } else {
+    nodes.push(searchBox('경로 검색 (경로명 · 출발지 · 도착지)', S.filters.routeQ, v => { S.filters.routeQ = v; renderLocal(); }));
+    const rq = normQ(S.filters.routeQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '이동 경로']),
       h('button', { class: 'btn btn-sm', text: '＋ 경로 추가', onclick: () => openEntityForm('route') })
     ]));
-    const list = S.routes.slice().sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
+    const list = S.routes.slice()
+      .filter(r => matchQ(rq, [r.name, r.fromPlace, r.toPlace, r.caution, r.memo, r.steps]))
+      .sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
     if (list.length) list.forEach(r => nodes.push(routeCard(r)));
     else nodes.push(emptyBox('저장된 경로가 없습니다', '예: 삿포로역 → 기타히로시마역 → 에스콘필드', '🧭'));
   }
@@ -2817,6 +2872,263 @@ function openPhotoDetail(p) {
 }
 
 /* =========================================================================
+ * 13-2. 전체 검색
+ * ========================================================================= */
+
+/** 검색 비교용으로 문자열을 정리합니다(소문자 + 공백 제거). */
+function normQ(v) {
+  return String(v === null || v === undefined ? '' : v).toLowerCase().replace(/\s+/g, '');
+}
+/** 여러 필드 중 하나라도 검색어를 포함하면 true */
+function matchQ(q, fields) {
+  if (!q) return true;
+  const text = normQ(fields.filter(Boolean).join(' '));
+  return text.indexOf(q) >= 0;
+}
+
+/** 탭 이동 도우미 (검색 결과에서 사용) */
+function goSchedule(date) { if (date) S.scheduleDate = date; switchTab('schedule'); }
+function goBooking(tab) { S.bookingTab = tab || 'flight'; switchTab('booking'); }
+function goLocal(tab, q) {
+  S.localTab = tab;
+  if (tab === 'phrase') S.filters.phraseQ = q || '';
+  if (tab === 'word') S.filters.wordQ = q || '';
+  if (tab === 'station') S.filters.stationQ = q || '';
+  if (tab === 'bus') S.filters.busQ = q || '';
+  if (tab === 'route') S.filters.routeQ = q || '';
+  switchTab('local');
+}
+function goRecord(date) {
+  if (date) S.recordDate = date;
+  S.recordTab = 'day';
+  switchTab('record');
+}
+
+/**
+ * 앱 안의 모든 데이터를 한 번에 검색합니다.
+ * @returns {Array} [{ key, label, items: [{ title, sub, badge, open }] }]
+ */
+function searchAll(rawQuery) {
+  const q = normQ(rawQuery);
+  if (!q) return [];
+  const groups = [];
+  const LIMIT = 8;
+
+  function add(key, label, items) {
+    if (items.length) groups.push({ key: key, label: label, items: items.slice(0, LIMIT), total: items.length });
+  }
+
+  /* 일정 */
+  add('schedule', '일정', S.schedules
+    .filter(s => matchQ(q, [s.title, s.place, s.description, s.prepare, s.transport, catInfo(s.category).label]))
+    .sort(sortByDateTime)
+    .map(s => ({
+      title: s.title,
+      sub: fmtDateKo(s.date, true) + (s.startTime ? ' ' + s.startTime : '') + (s.place ? ' · ' + s.place : ''),
+      badge: catInfo(s.category).label,
+      open: () => goSchedule(s.date)
+    })));
+
+  /* 예약 */
+  add('reservation', '예약 · 티켓', S.reservations
+    .filter(r => matchQ(q, [r.title, r.place, r.meetingPoint, r.bookingNumber, r.memo, r.prepare]))
+    .sort(sortByDateTime)
+    .map(r => ({
+      title: r.title,
+      sub: (r.date ? fmtDateKo(r.date, true) : '') + (r.place ? ' · ' + r.place : ''),
+      badge: (CFG.RESERVATION_TYPES.filter(t => t.key === r.type)[0] || { label: '기타' }).label,
+      open: () => openReservationDetail(r)
+    })));
+
+  /* 항공 */
+  add('flight', '항공', S.flights
+    .filter(f => matchQ(q, [f.flightNo, f.airline, f.depAirport, f.arrAirport, f.bookingNumber, f.seat, f.memo]))
+    .map(f => ({
+      title: (f.airline || '') + ' ' + (f.flightNo || ''),
+      sub: fmtDateKo(f.date, true) + ' · ' + (f.depAirport || '') + ' → ' + (f.arrAirport || ''),
+      badge: '항공',
+      open: () => goBooking('flight')
+    })));
+
+  /* 숙소 */
+  add('hotel', '숙소', S.accommodations
+    .filter(a => matchQ(q, [a.name, a.nameJa, a.address, a.addressJa, a.nearestStation, a.bookingNumber, a.memo]))
+    .map(a => ({
+      title: a.name,
+      sub: (a.checkInDate ? fmtDateKo(a.checkInDate) + ' → ' + fmtDateKo(a.checkOutDate) : '') + (a.nearestStation ? ' · ' + a.nearestStation : ''),
+      badge: '숙소',
+      open: () => goBooking('hotel')
+    })));
+
+  /* 일본어 표현 */
+  add('phrase', CO.localLabels.phrases, S.japanesePhrases
+    .filter(p => matchQ(q, [p.ko, p.ja, p.reading, p.memo]))
+    .map(p => ({
+      title: p.ko,
+      sub: p.ja + (p.reading ? ' · ' + p.reading : ''),
+      badge: (CFG.PHRASE_CATEGORIES.filter(c => c.key === p.category)[0] || { label: '' }).label,
+      open: () => goLocal('phrase', rawQuery)
+    })));
+
+  /* 일본어 단어 */
+  add('word', CO.localLabels.words, S.japaneseWords
+    .filter(w => matchQ(q, [w.ko, w.ja, w.reading, w.memo]))
+    .map(w => ({
+      title: w.ja + ' — ' + w.ko,
+      sub: w.reading || '',
+      badge: (CFG.WORD_CATEGORIES.filter(c => c.key === w.category)[0] || { label: '' }).label,
+      open: () => goLocal('word', rawQuery)
+    })));
+
+  /* 역 */
+  add('station', CO.localLabels.stations, S.stations
+    .filter(st => matchQ(q, [st.nameKo, st.nameJa, st.nameEn, st.lines, st.city, st.nearby, st.recommendedExit, st.memo]))
+    .map(st => ({
+      title: st.nameKo,
+      sub: (st.nameJa || '') + (st.lines ? ' · ' + st.lines : ''),
+      badge: '역',
+      open: () => goLocal('station', st.nameKo)
+    })));
+
+  /* 버스 */
+  add('bus', CO.localLabels.buses, S.buses
+    .filter(b => matchQ(q, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]))
+    .map(b => ({
+      title: b.lineName,
+      sub: (b.fromStop || '') + ' → ' + (b.toStop || ''),
+      badge: '버스',
+      open: () => goLocal('bus', b.lineName)
+    })));
+
+  /* 이동 경로 */
+  add('route', CO.localLabels.routes, S.routes
+    .filter(r => matchQ(q, [r.name, r.fromPlace, r.toPlace, r.caution, r.memo, r.steps]))
+    .map(r => ({
+      title: r.name,
+      sub: (r.totalMinutes ? '약 ' + r.totalMinutes + '분' : '') + (r.totalCost ? ' · ' + r.totalCost : ''),
+      badge: '경로',
+      open: () => goLocal('route', r.name)
+    })));
+
+  /* 기록 */
+  add('record', '기록', S.dailyRecords
+    .filter(r => matchQ(q, [r.oneLine, r.bestMoment, r.places, r.foods, r.freeText, r.revisit, r.tomorrow, r.surprise, r.music]))
+    .sort(sortByDateTime)
+    .map(r => ({
+      title: r.oneLine || (r.bestMoment || '').substring(0, 40) || '하루 기록',
+      sub: fmtDateKo(r.date, true) + ' · ' + memberInfo(r.author).emoji + ' ' + (r.author || ''),
+      badge: '기록',
+      open: () => goRecord(r.date)
+    })));
+
+  /* 공동 기록 */
+  add('shared', '공동 기록', S.sharedRecords
+    .filter(r => matchQ(q, [r.title, r.bestMoment, r.words, r.memo]))
+    .sort(sortByDateTime)
+    .map(r => ({
+      title: r.title || '공동 기록',
+      sub: fmtDateKo(r.date, true),
+      badge: '공동',
+      open: () => goRecord(r.date)
+    })));
+
+  /* 지출 */
+  add('expense', '지출', S.expenses
+    .filter(e => matchQ(q, [e.title, e.category, e.payer, e.memo]))
+    .map(e => ({
+      title: e.title,
+      sub: fmtDateKo(e.date, true) + ' · ' + (e.currency || CO.currency) + ' ' + (Number(e.amount) || 0).toLocaleString(),
+      badge: '지출',
+      open: () => { S.recordTab = 'expense'; switchTab('record'); }
+    })));
+
+  return groups;
+}
+
+/** 전체 검색 창 열기 (작성 중인 폼을 덮지 않도록 별도 겹침창) */
+function openGlobalSearch(initial) {
+  const input = h('input', {
+    type: 'search', placeholder: '일정 · 예약 · 일본어 · 역 · 기록 검색',
+    'aria-label': '전체 검색', autocomplete: 'off'
+  });
+  input.value = initial || '';
+  const results = h('div', { style: 'margin-top:12px' });
+
+  const box = h('div', {
+    class: 'confirm-box',
+    role: 'dialog', 'aria-modal': 'true', 'aria-label': '전체 검색',
+    style: 'max-width:560px;width:100%;max-height:78vh;display:flex;flex-direction:column;padding-bottom:12px'
+  }, [
+    h('div', { class: 'row', style: 'gap:6px' }, [
+      h('div', { style: 'flex:1' }, input),
+      h('button', { class: 'icon-btn', 'aria-label': '닫기', text: '✕', onclick: () => close() })
+    ]),
+    h('div', { style: 'flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch' }, results)
+  ]);
+  const back = h('div', { class: 'confirm-backdrop', style: 'z-index:92;align-items:flex-start;padding-top:8vh' }, box);
+
+  function close() {
+    if (back.parentNode) back.parentNode.removeChild(back);
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+  back.addEventListener('click', e => { if (e.target === back) close(); });
+
+  function draw() {
+    const q = input.value.trim();
+    clear(results);
+    if (!q) {
+      results.appendChild(h('p', { class: 'faint tiny', style: 'padding:14px 2px;line-height:1.8' },
+        '여행 안의 모든 내용을 한 번에 찾습니다.\n일정 · 예약 · 항공 · 숙소 · 일본어 표현 · 단어 · 역 · 버스 · 경로 · 기록 · 지출'));
+      return;
+    }
+    const groups = searchAll(q);
+    if (!groups.length) {
+      results.appendChild(emptyBox('결과가 없습니다', '"' + q + '" 와(과) 일치하는 내용을 찾지 못했습니다.', '🔍'));
+      return;
+    }
+    let count = 0;
+    groups.forEach(g => {
+      count += g.total;
+      results.appendChild(h('div', { class: 'section-head', style: 'margin:14px 2px 6px' }, [
+        h('h3', { class: 'section-title', style: 'font-size:.88rem' }, [h('span', { class: 'dot' }), g.label]),
+        h('span', { class: 'faint tiny', text: g.total + '건' })
+      ]));
+      g.items.forEach(it => {
+        results.appendChild(h('button', {
+          class: 'list-item',
+          style: 'display:block;width:100%;text-align:left;border:1px solid var(--line-soft);cursor:pointer;margin-bottom:6px',
+          onclick: () => { close(); it.open(); }
+        }, [
+          h('div', { class: 'row' }, [
+            h('div', { class: 'li-title', style: 'font-size:.94rem', text: it.title || '' }),
+            it.badge ? h('span', { class: 'badge', text: it.badge }) : null
+          ].filter(Boolean)),
+          it.sub ? h('div', { class: 'li-sub', text: it.sub }) : null
+        ].filter(Boolean)));
+      });
+      if (g.total > g.items.length) {
+        results.appendChild(h('p', { class: 'faint tiny', style: 'margin:2px 4px 8px', text: '외 ' + (g.total - g.items.length) + '건 더 있습니다.' }));
+      }
+    });
+    results.insertBefore(
+      h('p', { class: 'faint tiny', style: 'margin:4px 2px', text: '모두 ' + count + '건을 찾았습니다.' }),
+      results.firstChild
+    );
+  }
+
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(draw, 180);
+  });
+  draw();
+  document.body.appendChild(back);
+  setTimeout(() => input.focus(), 60);
+}
+
+/* =========================================================================
  * 14. 탭 전환 · 설정 메뉴
  * ========================================================================= */
 
@@ -2852,6 +3164,7 @@ function openMenu() {
 
   const items = [
     { label: '🧳 여행 기본 정보 수정', fn: () => { closeSheet(true); openEntityForm('trip', S.trip); } },
+    { label: '🔍 전체 검색', fn: () => { closeSheet(true); openGlobalSearch(''); } },
     { label: '🔄 지금 새로고침', fn: async () => { closeSheet(true); await bootstrap(true); toast('최신 자료를 불러왔습니다.', 'ok'); } },
     { label: '📝 임시 저장 (' + draftCount() + ')', fn: () => openDrafts() },
     { label: '🌙 밝기 테마 바꾸기', fn: () => { toggleTheme(); } },
@@ -2902,12 +3215,21 @@ function bindGlobalEvents() {
     toast('최신 자료를 불러왔습니다.', 'ok', 1600);
   });
   $('#menuBtn').addEventListener('click', openMenu);
+  $('#searchBtn').addEventListener('click', () => openGlobalSearch(''));
   $('#sheetClose').addEventListener('click', () => closeSheet(false));
   $('#sheetBackdrop').addEventListener('click', e => { if (e.target === $('#sheetBackdrop')) closeSheet(false); });
   $('#viewerClose').addEventListener('click', () => $('#viewer').classList.add('hidden'));
   $('#viewer').addEventListener('click', e => { if (e.target === $('#viewer')) $('#viewer').classList.add('hidden'); });
   $('#bigTextClose').addEventListener('click', () => $('#bigText').classList.add('hidden'));
   $('#bigText').addEventListener('click', e => { if (e.target === $('#bigText')) $('#bigText').classList.add('hidden'); });
+
+  // Ctrl/Cmd + K 로 전체 검색 열기
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      if (S.token && S.booted) openGlobalSearch('');
+    }
+  });
 
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;

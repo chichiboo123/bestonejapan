@@ -118,6 +118,7 @@ const PHRASE_CATEGORIES = [
   { key: 'airport',     label: '공항' },
   { key: 'train',       label: '철도 · 지하철' },
   { key: 'bus',         label: '버스' },
+  { key: 'taxi',        label: '택시' },
   { key: 'hotel',       label: '숙소' },
   { key: 'restaurant',  label: '식당' },
   { key: 'shopping',    label: '쇼핑' },
