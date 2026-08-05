@@ -8,7 +8,7 @@
  *   그러면 브라우저가 새 파일을 다시 받아옵니다.
  * ========================================================================= */
 
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const SHELL_CACHE = 'bestone-shell-' + CACHE_VERSION;
 const DATA_CACHE  = 'bestone-media-' + CACHE_VERSION;
 
@@ -18,6 +18,7 @@ const SHELL_FILES = [
   './index.html',
   './style.css',
   './config.js',
+  './data/transit.js',
   './script.js',
   './manifest.json',
   './icons/icon-192.png',

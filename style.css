@@ -648,6 +648,72 @@ input:focus, select:focus, textarea:focus {
 .word-card .star-btn { position: absolute; top: 2px; right: 2px; }
 .word-card .star-btn .mi { font-size: 19px; }
 
+/* ---------- 12-2. 노선도 · 길찾기 ---------- */
+.station-results {
+  border: 1px solid var(--line); border-radius: 12px; margin-top: 6px;
+  background: var(--surface); overflow: hidden; max-height: 300px; overflow-y: auto;
+}
+.station-opt {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: none; background: none; cursor: pointer; text-align: left;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
+}
+.station-opt:last-child { border-bottom: none; }
+.station-opt:hover { background: var(--surface-2); }
+.station-opt-ko { font-weight: 700; font-size: .94rem; }
+.station-opt-ja { font-size: .78rem; color: var(--text-faint); font-family: var(--font-ja); }
+.line-dots { display: flex; gap: 3px; flex: none; }
+.line-dot { width: 9px; height: 9px; border-radius: 50%; display: block; }
+
+.line-chip {
+  display: inline-block; color: #fff; font-weight: 800; font-size: .78rem;
+  border-radius: 6px; padding: 3px 9px; white-space: nowrap;
+}
+
+.route-legs { margin-top: 12px; }
+.route-leg { display: flex; gap: 12px; padding: 2px 0; }
+.route-bar { width: 8px; border-radius: 999px; flex: none; }
+.route-line-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.route-station { font-weight: 700; font-size: 1rem; }
+.route-mid {
+  font-size: .8rem; color: var(--text-soft);
+  padding: 6px 0 6px 2px; margin: 2px 0;
+  border-left: 2px dotted var(--line); padding-left: 10px; margin-left: 2px;
+}
+.route-transfer {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .82rem; color: var(--rose); font-weight: 700;
+  padding: 10px 0 10px 20px;
+}
+
+.line-diagram { margin-top: 8px; }
+.ld-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: none; background: none; cursor: pointer; text-align: left;
+  padding: 0 8px 0 0;
+}
+.ld-row:hover { background: var(--surface-2); border-radius: 8px; }
+.ld-rail {
+  width: 26px; flex: none; align-self: stretch;
+  display: flex; align-items: center; justify-content: center;
+  position: relative; min-height: 44px;
+}
+.ld-rail::before {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 5px;
+  background: var(--c); border-radius: 3px;
+}
+.ld-dot {
+  width: 13px; height: 13px; border-radius: 50%;
+  background: var(--surface); border: 3px solid; position: relative; z-index: 1;
+}
+.ld-code {
+  flex: none; min-width: 42px; font-size: .7rem; font-weight: 800;
+  color: var(--text-faint); letter-spacing: .02em;
+}
+.ld-ko { display: block; font-weight: 700; font-size: .95rem; }
+.ld-ja { display: block; font-size: .76rem; color: var(--text-faint); font-family: var(--font-ja); }
+.ld-map { color: var(--text-faint); flex: none; }
+
 /* ---------- 13. 기록 (내 기록 · 공동 기록 통합 피드) ---------- */
 .record-pair, .record-feed { display: grid; gap: 12px; }
 @media (min-width: 900px) { .record-feed { grid-template-columns: 1fr 1fr; align-items: start; } }

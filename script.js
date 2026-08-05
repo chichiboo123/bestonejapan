@@ -31,7 +31,7 @@ const S = {
   tab: 'today',
   date: null,          // 일정 · 기록 · 사진 · 지출이 공유하는 '선택된 날짜'
   bookingTab: 'flight',
-  localTab: 'phrase',
+  localTab: 'transit',
   recordTab: 'day',
   filters: {
     phraseCat: 'all', phraseFav: false, phraseQ: '',
@@ -39,6 +39,7 @@ const S = {
     bookingType: 'all', bookingQ: '',
     stationQ: '', busQ: '', routeQ: '', scheduleQ: ''
   },
+  transit: { city: 'tokyo', mode: 'route', from: null, to: null, result: null, searched: false, line: 0 },
   lastSync: null,
   loading: false,
   booted: false
@@ -2610,6 +2611,7 @@ function renderLocal() {
   const nodes = [];
 
   const tabs = [
+    { k: 'transit', l: '노선 · 길찾기' },
     { k: 'phrase', l: CO.localLabels.phrases },
     { k: 'word', l: CO.localLabels.words },
     { k: 'station', l: CO.localLabels.stations },
@@ -2625,7 +2627,10 @@ function renderLocal() {
   });
   nodes.push(bar);
 
-  if (S.localTab === 'phrase') {
+  if (S.localTab === 'transit') {
+    renderTransit().forEach(n => nodes.push(n));
+
+  } else if (S.localTab === 'phrase') {
     nodes.push(searchBox('표현 검색 (한국어 · 일본어 · 읽는 법)', S.filters.phraseQ, v => { S.filters.phraseQ = v; renderLocal(); }));
     const chips = h('div', { class: 'chips' });
     chips.appendChild(h('button', {
@@ -2713,6 +2718,7 @@ function renderLocal() {
     const buses = S.buses.filter(b => matchQ(bsq, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]));
     if (buses.length) buses.forEach(b => nodes.push(busCard(b)));
     else nodes.push(emptyBox('저장된 버스 정보가 없습니다', '지역마다 타는 방법이 다릅니다. 미리 적어 두면 든든합니다.', 'directions_bus'));
+    nodes.push(busGuideCard());
 
   } else {
     nodes.push(searchBox('경로 검색 (경로명 · 출발지 · 도착지)', S.filters.routeQ, v => { S.filters.routeQ = v; renderLocal(); }));
@@ -2733,10 +2739,73 @@ function renderLocal() {
   const addMap = {
     phrase: 'japanesePhrase', word: 'japaneseWord', station: 'station', bus: 'bus', route: 'route'
   };
-  view.appendChild(h('button', {
-    class: 'fab', 'aria-label': '추가',
-    onclick: () => openEntityForm(addMap[S.localTab])
-  }, mi('add', 'mi-lg')));
+  if (addMap[S.localTab]) {
+    view.appendChild(h('button', {
+      class: 'fab', 'aria-label': '추가',
+      onclick: () => openEntityForm(addMap[S.localTab])
+    }, mi('add', 'mi-lg')));
+  }
+}
+
+/**
+ * 지역별 버스 타는 방법 안내.
+ * 시각표·요금은 자주 바뀌므로 담지 않고, 이용 방식과 공식 사이트만 정리합니다.
+ */
+const BUS_GUIDE = [
+  {
+    city: '도쿄', color: '#4a6fa5',
+    rows: [
+      ['승차', '앞문으로 타고 바로 요금을 냅니다 (선불)'],
+      ['요금', '도영·민영버스 대부분 구간 상관없이 균일 요금'],
+      ['교통카드', 'Suica · PASMO 등 IC카드를 단말기에 터치'],
+      ['정리권', '필요 없습니다 (균일 요금 구간)'],
+      ['하차', '내릴 정류장 전에 벨을 누르고 뒷문으로 내립니다']
+    ],
+    links: [
+      { label: '도영버스 공식', url: 'https://www.kotsu.metro.tokyo.jp/bus/' },
+      { label: '도쿄 도영 노선 안내', url: 'https://tobus.jp/' }
+    ]
+  },
+  {
+    city: '삿포로 · 홋카이도', color: '#2f6f4f',
+    rows: [
+      ['승차', '뒷문(중간문)으로 타면서 정리권을 뽑습니다'],
+      ['요금', '탄 거리에 따라 올라갑니다 (거리 비례)'],
+      ['교통카드', 'Kitaca · Suica 등 사용 가능 (탈 때와 내릴 때 각각 터치)'],
+      ['정리권', '현금으로 낼 때 반드시 필요합니다'],
+      ['하차', '앞쪽 요금함에 정리권과 요금을 함께 넣고 앞문으로 내립니다'],
+      ['잔돈', '차내 요금함의 환전기에서 미리 바꿔 두세요 (1만엔권 불가)']
+    ],
+    links: [
+      { label: '홋카이도 중앙버스', url: 'https://www.chuo-bus.co.jp/' },
+      { label: '조테츠버스', url: 'https://www.jotetsu.co.jp/bus/' },
+      { label: '삿포로 시영교통(지하철·시전)', url: 'https://www.city.sapporo.jp/st/' }
+    ]
+  }
+];
+
+function busGuideCard() {
+  const wrap = h('div');
+  wrap.appendChild(h('div', { class: 'section-head' },
+    h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '버스 타는 법'])));
+
+  BUS_GUIDE.forEach(g => {
+    const card = h('div', { class: 'card card-tight' });
+    card.appendChild(h('div', { class: 'row mb8' }, [
+      h('span', { class: 'line-chip', style: 'background:' + g.color, text: g.city })
+    ]));
+    g.rows.forEach(r => { const n = kv(r[0], r[1]); if (n) card.appendChild(n); });
+    const links = h('div', { class: 'row-wrap mt8' });
+    g.links.forEach(l => links.appendChild(
+      iconBtn('open_in_new', l.label, 'btn btn-sm btn-ghost', () => openExternal(l.url))));
+    card.appendChild(links);
+    wrap.appendChild(card);
+  });
+
+  wrap.appendChild(h('p', { class: 'faint tiny mt8' },
+    '노선별 시각표와 요금은 자주 바뀌므로 앱에 담지 않았습니다. ' +
+    '위 공식 사이트나 구글 지도에서 확인한 내용을 아래에 직접 저장해 두세요.'));
+  return wrap;
 }
 
 function externalLinkCard() {
@@ -2749,6 +2818,521 @@ function externalLinkCard() {
   });
   card.appendChild(row);
   return card;
+}
+
+/* =========================================================================
+ * 12-2. 노선도 · 길찾기 (오픈 데이터 기반)
+ * -------------------------------------------------------------------------
+ * data/transit.js 의 노선·역 자료로 환승 경로를 계산합니다.
+ * 실시간 운행/요금은 담고 있지 않으므로, 결과 화면에서 구글 지도와
+ * 공식 사이트로 이어지는 버튼을 함께 제공합니다.
+ * ========================================================================= */
+
+const RIDE_MIN = 2;       // 역과 역 사이 평균 소요(분) - 추정치
+const TRANSFER_MIN = 5;   // 환승 1회 평균 소요(분) - 추정치
+
+/** 도시별 그래프 캐시 */
+const TRANSIT = { graphs: {} };
+
+function transitCities() {
+  return (window.TRANSIT_DATA && window.TRANSIT_DATA.cities) || [];
+}
+function transitCity(key) {
+  return transitCities().filter(c => c.key === key)[0] || transitCities()[0] || null;
+}
+
+/** 같은 역으로 볼 이름 정리 (전각 숫자·공백·기호 차이 흡수) */
+function stationKey(name) {
+  return String(name || '')
+    .replace(/[\s・･·、,]/g, '')
+    .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+}
+
+/**
+ * 이름은 같지만 실제로는 떨어져 있어 환승역이 아닌 곳.
+ * (사업자가 다를 때만 걸어서 이동하는 시간으로 계산합니다)
+ * 예) 삿포로의 지하철 白石역과 JR 白石역은 1km 넘게 떨어져 있습니다.
+ */
+const WALK_ONLY_STATIONS = { '白石': 15, '琴似': 12, '菊水': 14 };
+
+/** 이름이 달라도 환승으로 이어지는 역들 */
+const EXTRA_TRANSFERS = [
+  ['大手町', '東京'], ['国会議事堂前', '溜池山王'], ['有楽町', '日比谷'], ['有楽町', '銀座'],
+  ['日比谷', '銀座'], ['三越前', '新日本橋'], ['馬喰横山', '東日本橋'], ['馬喰横山', '馬喰町'],
+  ['東日本橋', '馬喰町'], ['秋葉原', '岩本町'], ['春日', '後楽園'], ['淡路町', '小川町'],
+  ['淡路町', '新御茶ノ水'], ['小川町', '新御茶ノ水'], ['築地', '新富町'], ['八丁堀', '京橋'],
+  ['新宿', '新宿西口'], ['新宿', '新宿三丁目'], ['上野広小路', '上野御徒町'],
+  ['上野広小路', '御徒町'], ['仲御徒町', '御徒町'], ['湯島', '上野広小路'],
+  ['原宿', '明治神宮前'],
+  // 삿포로 : 지하철은 히라가나, JR 은 한자로 적혀 이름이 다릅니다
+  ['さっぽろ', '札幌'], ['新さっぽろ', '新札幌'], ['すすきの', '豊水すすきの']
+];
+
+/**
+ * 도시의 노선 자료로 환승 그래프를 만듭니다.
+ * 노드 = (노선, 역 순번). 간선 = 이웃 역(승차) + 같은 역(환승).
+ */
+function buildTransitGraph(cityKey) {
+  if (TRANSIT.graphs[cityKey]) return TRANSIT.graphs[cityKey];
+  const city = transitCity(cityKey);
+  if (!city) return null;
+
+  const nodes = [];                 // { line, li, si, name, ko }
+  const adj = [];                   // [{ to, w, type }]
+  const byStation = {};             // 역이름키 -> [노드번호]
+
+  city.lines.forEach((line, li) => {
+    const base = nodes.length;
+    line.stations.forEach((s, si) => {
+      const id = nodes.length;
+      nodes.push({ li: li, si: si, ko: s.ko, ja: s.ja, code: s.c || '', g: s.g || null });
+      adj.push([]);
+      const k = stationKey(s.ja || s.ko);
+      (byStation[k] = byStation[k] || []).push(id);
+    });
+    // 승차 간선 (양방향)
+    for (let i = 0; i + 1 < line.stations.length; i++) {
+      const a = base + i, b = base + i + 1;
+      adj[a].push({ to: b, w: RIDE_MIN, type: 'ride' });
+      adj[b].push({ to: a, w: RIDE_MIN, type: 'ride' });
+    }
+    // 순환선은 끝과 처음을 이어줍니다
+    if (line.loop && line.stations.length > 2) {
+      const a = base + line.stations.length - 1, b = base;
+      adj[a].push({ to: b, w: RIDE_MIN, type: 'ride' });
+      adj[b].push({ to: a, w: RIDE_MIN, type: 'ride' });
+    }
+  });
+
+  // 환승 간선 : 같은 이름의 역끼리
+  function linkGroup(ids) {
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = nodes[ids[i]], b = nodes[ids[j]];
+        if (a.li === b.li) continue;
+        const la = city.lines[a.li], lb = city.lines[b.li];
+        // 이름만 같고 실제로는 떨어져 있는 역이면 도보 이동 시간으로 계산
+        const walk = WALK_ONLY_STATIONS[a.ja];
+        const w = (walk && la.op !== lb.op) ? walk : TRANSFER_MIN;
+        adj[ids[i]].push({ to: ids[j], w: w, type: 'transfer' });
+        adj[ids[j]].push({ to: ids[i], w: w, type: 'transfer' });
+      }
+    }
+  }
+  Object.keys(byStation).forEach(k => linkGroup(byStation[k]));
+
+  // 이름이 다른 도보 환승
+  EXTRA_TRANSFERS.forEach(pair => {
+    const a = byStation[stationKey(pair[0])] || [];
+    const b = byStation[stationKey(pair[1])] || [];
+    a.forEach(x => b.forEach(y => {
+      if (nodes[x].li === nodes[y].li) return;
+      adj[x].push({ to: y, w: TRANSFER_MIN + 3, type: 'transfer' });
+      adj[y].push({ to: x, w: TRANSFER_MIN + 3, type: 'transfer' });
+    }));
+  });
+
+  const g = { city: city, nodes: nodes, adj: adj, byStation: byStation };
+  TRANSIT.graphs[cityKey] = g;
+  return g;
+}
+
+/** 역 이름으로 검색 (한국어 · 일본어 · 역번호) */
+function searchStations(cityKey, query, limit) {
+  const g = buildTransitGraph(cityKey);
+  if (!g) return [];
+  const q = normQ(query);
+  if (!q) return [];
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < g.nodes.length; i++) {
+    const n = g.nodes[i];
+    const k = stationKey(n.ja || n.ko);
+    if (seen[k]) continue;
+    if (!matchQ(q, [n.ko, n.ja, n.code])) continue;
+    seen[k] = 1;
+    // 완전히 같은 이름 > 앞부분 일치 > 그 밖의 순서로 보여줍니다
+    const ko = normQ(n.ko), ja = normQ(n.ja);
+    const rank = (ko === q || ja === q) ? 0 : (ko.indexOf(q) === 0 || ja.indexOf(q) === 0) ? 1 : 2;
+    const lines = (g.byStation[k] || []).map(id => g.city.lines[g.nodes[id].li]);
+    out.push({ key: k, ko: n.ko, ja: n.ja, lines: lines, nodeIds: g.byStation[k] || [], rank: rank });
+  }
+  out.sort((a, b) => a.rank - b.rank || a.ko.length - b.ko.length);
+  return out.slice(0, limit || 12);
+}
+
+/**
+ * 환승 경로 찾기 (다익스트라).
+ * 같은 이름의 역은 어느 노선에서 출발/도착해도 되도록 모두 시작·도착점으로 둡니다.
+ */
+function findTransitRoute(cityKey, fromKey, toKey) {
+  const g = buildTransitGraph(cityKey);
+  if (!g) return null;
+  const starts = g.byStation[fromKey] || [];
+  const goals = {};
+  (g.byStation[toKey] || []).forEach(id => { goals[id] = 1; });
+  if (!starts.length || !Object.keys(goals).length) return null;
+
+  const N = g.nodes.length;
+  const dist = new Float64Array(N).fill(Infinity);
+  const prev = new Int32Array(N).fill(-1);
+  const prevType = new Array(N).fill('');
+
+  // 간단한 이진 힙
+  const heap = [];
+  function push(node, d) {
+    heap.push([d, node]);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heap[p][0] <= heap[i][0]) break;
+      const t = heap[p]; heap[p] = heap[i]; heap[i] = t; i = p;
+    }
+  }
+  function pop() {
+    const top = heap[0];
+    const last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1, r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+        if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+        if (m === i) break;
+        const t = heap[m]; heap[m] = heap[i]; heap[i] = t; i = m;
+      }
+    }
+    return top;
+  }
+
+  starts.forEach(id => { dist[id] = 0; push(id, 0); });
+
+  let goal = -1;
+  while (heap.length) {
+    const cur = pop();
+    const d = cur[0], u = cur[1];
+    if (d > dist[u]) continue;
+    if (goals[u]) { goal = u; break; }
+    const edges = g.adj[u];
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      const nd = d + e.w;
+      if (nd < dist[e.to]) {
+        dist[e.to] = nd;
+        prev[e.to] = u;
+        prevType[e.to] = e.type;
+        push(e.to, nd);
+      }
+    }
+  }
+  if (goal < 0) return null;
+
+  // 경로 되짚기
+  const path = [];
+  for (let v = goal; v >= 0; v = prev[v]) path.push(v);
+  path.reverse();
+
+  // 같은 노선 구간끼리 묶어 '구간(leg)' 으로 만듭니다
+  const legs = [];
+  let i = 0;
+  while (i < path.length - 1) {
+    if (prevType[path[i + 1]] === 'transfer') { i++; continue; }
+    const li = g.nodes[path[i]].li;
+    let j = i;
+    while (j + 1 < path.length && prevType[path[j + 1]] === 'ride' && g.nodes[path[j + 1]].li === li) j++;
+    if (j > i) {
+      const line = g.city.lines[li];
+      const fromN = g.nodes[path[i]], toN = g.nodes[path[j]];
+      const stops = [];
+      for (let k = i; k <= j; k++) stops.push(g.nodes[path[k]]);
+      // 진행 방향 안내
+      let heading;
+      if (line.loop) {
+        heading = g.nodes[path[i + 1]].ko + ' 방면';
+      } else {
+        const forward = toN.si > fromN.si;
+        const term = forward ? line.stations[line.stations.length - 1] : line.stations[0];
+        heading = term.ko + ' 방면';
+      }
+      legs.push({
+        line: line, from: fromN, to: toN, stops: stops,
+        count: j - i, minutes: (j - i) * RIDE_MIN, heading: heading
+      });
+    }
+    i = j + 1 <= path.length - 1 ? j : j + 1;
+    if (j === i) i++;
+  }
+
+  const transfers = Math.max(0, legs.length - 1);
+  const rideMin = legs.reduce((a, l) => a + l.minutes, 0);
+  return {
+    legs: legs,
+    transfers: transfers,
+    minutes: rideMin + transfers * TRANSFER_MIN,
+    rideMinutes: rideMin,
+    from: g.byStation[fromKey] ? g.nodes[g.byStation[fromKey][0]] : null,
+    to: g.byStation[toKey] ? g.nodes[g.byStation[toKey][0]] : null
+  };
+}
+
+/* ---------- 화면 ---------- */
+
+/** 역 선택 입력칸 (검색해서 고르기) */
+function stationPicker(labelText, cityKey, current, onPick) {
+  const box = h('div', { class: 'form-row' });
+  box.appendChild(h('label', { text: labelText }));
+
+  const input = h('input', { type: 'search', placeholder: '역 이름 (한국어 · 일본어)', 'aria-label': labelText });
+  if (current) input.value = current.ko + ' ' + (current.ja || '');
+  const results = h('div', { class: 'station-results hidden' });
+
+  let timer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const list = searchStations(cityKey, input.value, 10);
+      clear(results);
+      if (!input.value.trim() || !list.length) { results.classList.add('hidden'); return; }
+      results.classList.remove('hidden');
+      list.forEach(s => {
+        results.appendChild(h('button', {
+          type: 'button', class: 'station-opt',
+          onclick: () => {
+            input.value = s.ko;
+            results.classList.add('hidden');
+            onPick(s);
+          }
+        }, [
+          h('div', { style: 'flex:1;min-width:0' }, [
+            h('div', { class: 'station-opt-ko', text: s.ko }),
+            h('div', { class: 'station-opt-ja', text: s.ja })
+          ]),
+          h('div', { class: 'line-dots' }, s.lines.slice(0, 5).map(l =>
+            h('span', { class: 'line-dot', style: 'background:' + l.color, title: l.ko })))
+        ]));
+      });
+    }, 160);
+  });
+  input.addEventListener('focus', () => { if (results.childNodes.length) results.classList.remove('hidden'); });
+
+  box.appendChild(input);
+  box.appendChild(results);
+  return box;
+}
+
+/** 경로 결과 카드 */
+function routeResultCard(cityKey, result, fromName, toName) {
+  if (!result) {
+    return emptyBox('경로를 찾지 못했습니다',
+      '두 역이 서로 다른 도시이거나, 이 앱에 담긴 노선만으로는 이어지지 않을 수 있습니다.\n구글 지도에서 확인해 보세요.', 'wrong_location');
+  }
+  const card = h('div', { class: 'card' });
+
+  card.appendChild(h('div', { class: 'row mb8' }, [
+    h('div', { style: 'flex:1;min-width:0' }, [
+      h('div', { class: 'next-label', text: '예상 소요' }),
+      h('div', { style: 'font-size:1.4rem;font-weight:800', text: '약 ' + result.minutes + '분' }),
+      h('div', { class: 'faint tiny', text: '환승 ' + result.transfers + '회 · 정차 ' + result.legs.reduce((a, l) => a + l.count, 0) + '개 역' })
+    ]),
+    mi('directions_transit', 'mi-lg')
+  ]));
+
+  const tl = h('div', { class: 'route-legs' });
+  result.legs.forEach((leg, i) => {
+    if (i > 0) {
+      tl.appendChild(h('div', { class: 'route-transfer' }, [
+        mi('transfer_within_a_station', 'mi-sm'),
+        h('span', { text: leg.from.ko + '에서 환승 (약 ' + TRANSFER_MIN + '분)' })
+      ]));
+    }
+    tl.appendChild(h('div', { class: 'route-leg' }, [
+      h('span', { class: 'route-bar', style: 'background:' + leg.line.color }),
+      h('div', { style: 'flex:1;min-width:0' }, [
+        h('div', { class: 'route-line-name' }, [
+          h('span', { class: 'line-chip', style: 'background:' + leg.line.color, text: leg.line.ko }),
+          h('span', { class: 'faint tiny', text: leg.heading })
+        ]),
+        h('div', { class: 'route-station', text: leg.from.ko + (leg.from.code ? ' (' + leg.from.code + ')' : '') }),
+        h('div', { class: 'route-mid', text: leg.count + '개 역 · 약 ' + leg.minutes + '분' }),
+        h('div', { class: 'route-station', text: leg.to.ko + (leg.to.code ? ' (' + leg.to.code + ')' : '') })
+      ])
+    ]));
+  });
+  card.appendChild(tl);
+
+  card.appendChild(h('p', { class: 'faint tiny mt8' },
+    '소요 시간은 역 1개당 ' + RIDE_MIN + '분, 환승 1회당 ' + TRANSFER_MIN + '분으로 계산한 추정치입니다. ' +
+    '실제 시각표 · 요금 · 지연 정보는 구글 지도나 공식 사이트에서 확인해 주세요.'));
+
+  card.appendChild(h('div', { class: 'li-actions' }, [
+    iconBtn('map', '구글 지도에서 보기', 'btn btn-sm btn-primary', () => {
+      const url = 'https://www.google.com/maps/dir/?api=1' +
+        '&origin=' + encodeURIComponent((result.from ? result.from.ja : fromName) + ' 駅') +
+        '&destination=' + encodeURIComponent((result.to ? result.to.ja : toName) + ' 駅') +
+        '&travelmode=transit';
+      openExternal(url);
+    }),
+    iconBtn('bookmark_add', '이동 경로로 저장', 'btn btn-sm', () => saveTransitRoute(result, fromName, toName))
+  ]));
+
+  return card;
+}
+
+/** 계산한 경로를 기존 '이동 경로'로 저장 */
+function saveTransitRoute(result, fromName, toName) {
+  const steps = result.legs.map(leg => ({
+    type: 'train',
+    line: leg.line.ko,
+    from: leg.from.ko,
+    to: leg.to.ko,
+    platform: '',
+    minutes: String(leg.minutes),
+    cost: '',
+    note: leg.heading + ' · ' + leg.count + '개 역'
+  }));
+  openEntityForm('route', null, {
+    name: fromName + ' → ' + toName,
+    fromPlace: fromName,
+    toPlace: toName,
+    steps: JSON.stringify(steps),
+    totalMinutes: String(result.minutes),
+    caution: '환승 ' + result.transfers + '회. 소요 시간은 추정치입니다.'
+  });
+}
+
+/** 노선도 (역 순서대로) */
+function lineDiagram(line) {
+  const wrap = h('div', { class: 'line-diagram' });
+  line.stations.forEach((s, i) => {
+    wrap.appendChild(h('button', {
+      type: 'button', class: 'ld-row',
+      onclick: () => openBigText(s.ja, s.ko + (s.c ? '\n' + s.c : ''))
+    }, [
+      h('span', { class: 'ld-rail', style: '--c:' + line.color }, [
+        h('span', { class: 'ld-dot', style: 'border-color:' + line.color })
+      ]),
+      h('span', { class: 'ld-code', text: s.c || String(i + 1) }),
+      h('span', { style: 'flex:1;min-width:0' }, [
+        h('span', { class: 'ld-ko', text: s.ko }),
+        h('span', { class: 'ld-ja', text: s.ja })
+      ]),
+      s.g ? h('span', { class: 'ld-map', 'aria-label': '지도' }, mi('place', 'mi-sm')) : null
+    ].filter(Boolean)));
+  });
+  return wrap;
+}
+
+function renderTransit() {
+  const nodes = [];
+  if (!window.TRANSIT_DATA) {
+    return [emptyBox('노선 자료를 불러오지 못했습니다', 'data/transit.js 파일이 올라가 있는지 확인해 주세요.', 'wrong_location')];
+  }
+  const cityKey = S.transit.city;
+
+  // 도시 선택
+  const chips = h('div', { class: 'chips' });
+  transitCities().forEach(c => {
+    chips.appendChild(h('button', {
+      class: 'chip' + (cityKey === c.key ? ' active' : ''), text: c.ko,
+      onclick: () => {
+        S.transit.city = c.key; S.transit.result = null; S.transit.searched = false;
+        S.transit.from = null; S.transit.to = null; S.transit.line = 0;
+        renderLocal();
+      }
+    }));
+  });
+  nodes.push(chips);
+
+  // 길찾기 / 노선도 전환
+  const modes = h('div', { class: 'subtabs', style: 'margin-top:6px' });
+  [{ k: 'route', l: '길찾기' }, { k: 'map', l: '노선도' }].forEach(m => {
+    modes.appendChild(h('button', {
+      class: 'subtab' + (S.transit.mode === m.k ? ' active' : ''), text: m.l,
+      onclick: () => { S.transit.mode = m.k; renderLocal(); }
+    }));
+  });
+  nodes.push(modes);
+
+  if (S.transit.mode === 'route') {
+    const form = h('div', { class: 'card' });
+    form.appendChild(stationPicker('출발역', cityKey, S.transit.from, s => { S.transit.from = s; }));
+    form.appendChild(stationPicker('도착역', cityKey, S.transit.to, s => { S.transit.to = s; }));
+
+    form.appendChild(h('div', { class: 'row-wrap' }, [
+      iconBtn('search', '경로 찾기', 'btn btn-primary', () => {
+        if (!S.transit.from || !S.transit.to) { toast('출발역과 도착역을 골라주세요.', 'error'); return; }
+        if (S.transit.from.key === S.transit.to.key) { toast('출발역과 도착역이 같습니다.', 'error'); return; }
+        S.transit.result = findTransitRoute(cityKey, S.transit.from.key, S.transit.to.key);
+        S.transit.searched = true;
+        renderLocal();
+      }),
+      iconBtn('swap_vert', '출발↔도착', 'btn btn-ghost', () => {
+        const t = S.transit.from; S.transit.from = S.transit.to; S.transit.to = t;
+        S.transit.result = null; S.transit.searched = false;
+        renderLocal();
+      })
+    ]));
+    nodes.push(form);
+
+    if (S.transit.searched) {
+      nodes.push(routeResultCard(cityKey, S.transit.result,
+        S.transit.from ? S.transit.from.ko : '', S.transit.to ? S.transit.to.ko : ''));
+    }
+
+    // 내가 저장한 역을 빠르게 넣기
+    if (S.stations.length) {
+      nodes.push(h('p', { class: 'faint tiny mt8', text: '저장한 역을 눌러 출발역으로 넣을 수 있습니다.' }));
+      const quick = h('div', { class: 'chips' });
+      S.stations.slice(0, 10).forEach(st => {
+        quick.appendChild(h('button', {
+          class: 'chip', text: st.nameKo,
+          onclick: () => {
+            const found = searchStations(cityKey, st.nameJa || st.nameKo, 1)[0];
+            if (!found) { toast('노선 자료에서 찾지 못했습니다.', 'error'); return; }
+            S.transit.from = found;
+            renderLocal();
+          }
+        }));
+      });
+      nodes.push(quick);
+    }
+
+  } else {
+    const city = transitCity(cityKey);
+    const sel = h('select', { 'aria-label': '노선 선택' });
+    city.lines.forEach((l, i) => sel.appendChild(h('option', { value: String(i), text: l.ko })));
+    sel.value = String(S.transit.line || 0);
+    sel.addEventListener('change', () => { S.transit.line = Number(sel.value); renderLocal(); });
+    nodes.push(h('div', { class: 'form-row' }, sel));
+
+    const line = city.lines[S.transit.line || 0];
+    if (line) {
+      nodes.push(h('div', { class: 'card card-tight' }, [
+        h('div', { class: 'row' }, [
+          h('span', { class: 'line-chip', style: 'background:' + line.color, text: line.ko }),
+          h('span', { class: 'spacer' }),
+          h('span', { class: 'faint tiny', text: line.stations.length + '개 역' + (line.loop ? ' · 순환' : '') })
+        ]),
+        h('div', { class: 'faint tiny mt8', text: line.ja + (line.en ? ' · ' + line.en : '') })
+      ]));
+      nodes.push(lineDiagram(line));
+    }
+  }
+
+  nodes.push(h('div', { class: 'card card-tight mt12' }, [
+    h('div', { class: 'faint tiny', text: '노선 자료 출처 (오픈 소스)' }),
+    h('div', { class: 'mt8' }, (window.TRANSIT_DATA.meta.sources || []).map(src =>
+      h('div', { class: 'tiny', style: 'padding:2px 0' }, [
+        h('a', { href: src.url, target: '_blank', rel: 'noopener noreferrer', text: src.name }),
+        h('span', { class: 'faint', text: ' (' + src.license + ') — ' + src.use })
+      ])
+    )),
+    h('p', { class: 'faint tiny mt8', text: window.TRANSIT_DATA.meta.note })
+  ]));
+
+  return nodes;
 }
 
 /* =========================================================================
