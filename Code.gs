@@ -36,10 +36,17 @@ var COMMON_TAIL = ['createdBy', 'createdAt', 'updatedBy', 'updatedAt', 'isDelete
  * 시각 전용 값은 내부적으로 1899-12-30 을 기준일로 저장되어 있어서
  * 그대로 포맷하면 "1899-12-30T08:47:08Z" 같은 값이 되어버립니다.
  *
- * 이 문제를 막기 위해:
- *   1) 아래 목록의 컬럼은 시트에 셀 서식을 "일반 텍스트"로 강제합니다
- *      (getSheet_ / headersOf_ 에서 처리) → 앞으로는 자동 변환되지 않습니다.
- *   2) 그래도 이미 Date 로 저장되어 있던 값은 읽을 때(formatDateTimeCell_)
+ * 이 문제를 막기 위해 세 겹으로 막습니다:
+ *   1) 시트를 새로 만들거나 칸을 새로 추가할 때 컬럼 전체를 "일반 텍스트"로
+ *      강제합니다 (getSheet_ / headersOf_ → protectDateTimeColumns_).
+ *   2) ★ 값을 실제로 쓰기 "바로 직전"에 그 행만 다시 한번 강제합니다
+ *      (saveEntity_ / appendObject_ 등 → protectRowDateTimeColumns_).
+ *      1번 보호가 언제 적용됐는지와 상관없이, 새로 추가되는 행은 항상
+ *      이 단계에서 보호받습니다. ("12:30 입력 → 새로고침하면 12:32" 처럼
+ *      나타나는 문제의 진짜 원인이 바로 이 부분이 빠져 있던 것이었습니다:
+ *      예전에 repairDateTimeColumns 를 한 번 실행해도, 그 뒤에 새로
+ *      추가된 행은 보호 범위 밖이라 다시 자동 변환될 수 있었습니다)
+ *   3) 그래도 이미 Date 로 저장되어 있던(과거) 값은 읽을 때(formatDateTimeCell_)
  *      필드 종류에 맞춰 올바른 형태(날짜만 또는 시각만)로 복원합니다.
  */
 /** 날짜만 담는 칸 (yyyy-MM-dd) */
@@ -104,6 +111,35 @@ function protectDateTimeColumns_(sh, sheetName, headers, onlyCols) {
     try {
       sh.getRange(2, col, maxRows, 1).setNumberFormat('@');
     } catch (e) { /* 서식 설정 실패는 무시하고 계속 진행 */ }
+  });
+}
+
+/**
+ * ★ 시간이 저장할 때마다 미세하게 틀어지는 문제(예: 12:30 입력 → 새로고침하면 12:32)의
+ * 근본 원인을 막는 함수입니다.
+ *
+ * protectDateTimeColumns_ 는 시트를 새로 만들거나 칸을 새로 추가할 때만 실행되는데,
+ * 그 이후에 새로 추가되는 "행"은 이 서식을 물려받지 못할 수 있습니다.
+ * (특히 예전에 만든 시트에서 repairDateTimeColumns 를 한 번 실행한 뒤,
+ *  그 뒤에 새로 저장한 일정들이 다시 자동 변환되는 경우가 정확히 이 상황입니다)
+ *
+ * 그래서 실제로 값을 쓰기 "바로 직전"에 그 줄(행)의 날짜·시각 칸만 다시 한번
+ * "일반 텍스트" 서식으로 강제합니다. 이렇게 하면 이전에 시트 전체가 보호되어
+ * 있었는지와 상관없이, 이 함수를 거쳐 저장하는 값은 항상 안전합니다.
+ *
+ * @param {Sheet} sh 대상 시트
+ * @param {string} sheetName 시트 이름
+ * @param {string[]} headers 전체 헤더 배열
+ * @param {number} row 보호할 행 번호(1부터 시작, 보통 새로 쓸 행)
+ * @param {number} [rowCount] 한 번에 여러 줄을 쓸 때 줄 수 (기본 1)
+ */
+function protectRowDateTimeColumns_(sh, sheetName, headers, row, rowCount) {
+  var count = rowCount || 1;
+  headers.forEach(function (h, idx) {
+    if (!isProtectedColumn_(sheetName, h)) return;
+    try {
+      sh.getRange(row, idx + 1, count, 1).setNumberFormat('@');
+    } catch (e) { /* 서식 설정 실패는 무시하고 계속 진행 (값 자체는 정상 저장됩니다) */ }
   });
 }
 
@@ -630,6 +666,7 @@ function apiLogin_(req) {
   var expires = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 
   var sh = getSheet_('Sessions');
+  protectRowDateTimeColumns_(sh, 'Sessions', headersOf_(sh, 'Sessions'), sh.getLastRow() + 1);
   sh.appendRow([
     token,
     prop_('TRIP_ID', 'trip-jp-001'),
@@ -811,6 +848,7 @@ function appendObject_(sheetName, obj) {
     var v = obj[h];
     return (v === undefined || v === null) ? '' : v;
   });
+  protectRowDateTimeColumns_(sh, sheetName, headers, sh.getLastRow() + 1);
   sh.appendRow(row);
   return obj;
 }
@@ -895,6 +933,9 @@ function saveEntity_(sheetName, req, ctx) {
         var v = merged[h];
         return (v === undefined || v === null) ? '' : v;
       });
+      // 쓰기 직전에 이 행의 날짜·시각 칸을 다시 한번 "일반 텍스트"로 강제합니다.
+      // (시트가 예전부터 있었거나, 이전 보호 범위 밖의 행이어도 항상 안전하게)
+      protectRowDateTimeColumns_(sh, sheetName, headers, targetRow);
       sh.getRange(targetRow, 1, 1, headers.length).setValues([newRow]);
       logActivity_(ctx.nickname, 'UPDATE', sheetName, String(merged.id));
       return ok_({ record: merged, sheet: sheetName }, '저장되었습니다.');
@@ -919,6 +960,8 @@ function saveEntity_(sheetName, req, ctx) {
         var v = fresh[h];
         return (v === undefined || v === null) ? '' : v;
       });
+      // 새로 추가되는 행은 이전 보호 범위를 벗어났을 수 있으므로 쓰기 직전에 다시 보호합니다.
+      protectRowDateTimeColumns_(sh, sheetName, headers, sh.getLastRow() + 1);
       sh.appendRow(appendRowValues);
       logActivity_(ctx.nickname, 'CREATE', sheetName, String(fresh.id));
       return ok_({ record: fresh, sheet: sheetName }, '저장되었습니다.');
@@ -953,7 +996,10 @@ function deleteEntity_(sheetName, req, ctx) {
         var row = i + 2;
         if (delCol >= 0) sh.getRange(row, delCol + 1).setValue(true);
         if (upByCol >= 0) sh.getRange(row, upByCol + 1).setValue(ctx.nickname);
-        if (upAtCol >= 0) sh.getRange(row, upAtCol + 1).setValue(new Date().toISOString());
+        if (upAtCol >= 0) {
+          sh.getRange(row, upAtCol + 1).setNumberFormat('@');
+          sh.getRange(row, upAtCol + 1).setValue(new Date().toISOString());
+        }
         logActivity_(ctx.nickname, 'DELETE', sheetName, id);
         return ok_({ id: id, sheet: sheetName }, '삭제되었습니다.');
       }
@@ -1031,11 +1077,15 @@ function writeSetting_(key, value) {
     var keys = sh.getRange(2, 1, lastRow - 1, 1).getValues();
     for (var i = 0; i < keys.length; i++) {
       if (String(keys[i][0]) === String(key)) {
+        // 'value' 칸에는 startDate 같은 날짜가 들어올 수 있어 항상 텍스트로 고정합니다.
+        sh.getRange(i + 2, 2, 1, 2).setNumberFormat('@');
         sh.getRange(i + 2, 2, 1, 2).setValues([[value, nowIso]]);
         return;
       }
     }
   }
+  var newRow = sh.getLastRow() + 1;
+  sh.getRange(newRow, 2, 1, 2).setNumberFormat('@');
   sh.appendRow([key, value, nowIso]);
 }
 
@@ -1579,6 +1629,7 @@ function isOurDriveFile_(fileId) {
 function logActivity_(nickname, action, target, detail) {
   try {
     var sh = getSheet_('ActivityLogs');
+    protectRowDateTimeColumns_(sh, 'ActivityLogs', headersOf_(sh, 'ActivityLogs'), sh.getLastRow() + 1);
     sh.appendRow([
       Utilities.getUuid(),
       prop_('TRIP_ID', 'trip-jp-001'),
@@ -2455,6 +2506,10 @@ function repairDateTimeColumns_(ss) {
       if (changed) range.setValues(out);
     });
 
+    // 지금 값이 있는 줄뿐 아니라, 앞으로 새로 추가될 줄도 미리 보호해 둡니다.
+    // (이렇게 해 두어도 저장할 때마다 한 번 더 확인하므로 이중 안전장치입니다)
+    protectDateTimeColumns_(sh, name, headers);
+
     if (fixedCount) log.push('[복구] ' + name + ' 시트에서 ' + fixedCount + '칸을 고쳤습니다.');
   });
 
@@ -2732,7 +2787,9 @@ function bulkAppend_(sheetName, objects) {
       return (v === undefined || v === null) ? '' : v;
     });
   });
-  sh.getRange(sh.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+  var startRow = sh.getLastRow() + 1;
+  protectRowDateTimeColumns_(sh, sheetName, headers, startRow, rows.length);
+  sh.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
 }
 
 function addDays_(dateStr, n) {
