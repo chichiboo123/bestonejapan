@@ -15,6 +15,7 @@
  *   3) seedJapanData()         : 일본어 표현/단어/샘플 데이터 생성
  *   4) checkSetup()            : 설정이 제대로 되었는지 점검
  *   5) clearSampleData()       : 샘플 데이터만 삭제
+ *   6) repairDateTimeColumns() : 날짜/시각이 "1899-12-30..." 처럼 깨져 보일 때 복구
  *************************************************************/
 
 /* ============================================================
@@ -25,6 +26,53 @@ var APP_VERSION = '1.0.0';
 
 /** 공통 필드 (모든 데이터 시트 끝에 붙습니다) */
 var COMMON_TAIL = ['createdBy', 'createdAt', 'updatedBy', 'updatedAt', 'isDeleted', 'isSample'];
+
+/**
+ * 날짜/시각 자동 서식 문제 방지용 필드 분류
+ * -----------------------------------------------------------
+ * Google Sheets 는 "09:22", "2026-08-05" 같은 문자열을 셀에 쓰면
+ * 사람이 직접 입력한 것처럼 자동으로 날짜/시각 형식으로 바꿔버립니다.
+ * 그러면 다음에 읽어올 때 문자열이 아니라 Date 객체로 돌아오는데,
+ * 시각 전용 값은 내부적으로 1899-12-30 을 기준일로 저장되어 있어서
+ * 그대로 포맷하면 "1899-12-30T08:47:08Z" 같은 값이 되어버립니다.
+ *
+ * 이 문제를 막기 위해:
+ *   1) 아래 목록의 컬럼은 시트에 셀 서식을 "일반 텍스트"로 강제합니다
+ *      (getSheet_ / headersOf_ 에서 처리) → 앞으로는 자동 변환되지 않습니다.
+ *   2) 그래도 이미 Date 로 저장되어 있던 값은 읽을 때(formatDateTimeCell_)
+ *      필드 종류에 맞춰 올바른 형태(날짜만 또는 시각만)로 복원합니다.
+ */
+var DATE_ONLY_FIELDS_ = { date: 1, checkInDate: 1, checkOutDate: 1 };
+var TIME_ONLY_FIELDS_ = {
+  startTime: 1, endTime: 1, depTime: 1, arrTime: 1, boardingTime: 1,
+  checkInTime: 1, checkOutTime: 1, departBy: 1
+};
+
+/** Date 객체를 필드 종류에 맞는 문자열로 되돌립니다. Date 가 아니면 그대로 돌려줍니다. */
+function formatDateTimeCell_(header, v) {
+  if (!(v instanceof Date)) return v;
+  if (DATE_ONLY_FIELDS_[header]) return Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd');
+  if (TIME_ONLY_FIELDS_[header]) return Utilities.formatDate(v, 'Asia/Tokyo', 'HH:mm');
+  return Utilities.formatDate(v, 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+}
+
+/**
+ * 날짜·시각 전용 컬럼에 "일반 텍스트" 서식을 강제해 자동 변환을 막습니다.
+ * @param {Sheet} sh 대상 시트
+ * @param {string[]} headers 전체 헤더 배열
+ * @param {number[]} [onlyCols] 1부터 시작하는 컬럼 번호만 처리하고 싶을 때 (없으면 전체)
+ */
+function protectDateTimeColumns_(sh, headers, onlyCols) {
+  var maxRows = Math.max(sh.getMaxRows() - 1, 1);
+  headers.forEach(function (h, idx) {
+    if (!DATE_ONLY_FIELDS_[h] && !TIME_ONLY_FIELDS_[h]) return;
+    var col = idx + 1;
+    if (onlyCols && onlyCols.indexOf(col) === -1) return;
+    try {
+      sh.getRange(2, col, maxRows, 1).setNumberFormat('@');
+    } catch (e) { /* 서식 설정 실패는 무시하고 계속 진행 */ }
+  });
+}
 
 /** 시트 이름과 헤더(영문 필드명) 정의 */
 var SCHEMA = {
@@ -362,6 +410,7 @@ function getSheet_(name) {
     sh.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]);
     sh.setFrozenRows(1);
     sh.getRange(1, 1, 1, SCHEMA[name].length).setFontWeight('bold').setBackground('#f0ece1');
+    protectDateTimeColumns_(sh, SCHEMA[name]);
   }
   return sh;
 }
@@ -371,6 +420,7 @@ function headersOf_(sh, name) {
   var lastCol = sh.getLastColumn();
   if (lastCol < 1) {
     sh.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]);
+    protectDateTimeColumns_(sh, SCHEMA[name]);
     return SCHEMA[name].slice();
   }
   var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h || ''); });
@@ -381,7 +431,10 @@ function headersOf_(sh, name) {
   });
   if (missing.length) {
     sh.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+    var newCols = [];
+    for (var i = 0; i < missing.length; i++) newCols.push(headers.length + 1 + i);
     headers = headers.concat(missing);
+    protectDateTimeColumns_(sh, headers, newCols);
   }
   return headers;
 }
@@ -406,7 +459,7 @@ function readSheetObjects_(name, skipDeleted) {
     for (var c = 0; c < headers.length; c++) {
       if (!headers[c]) continue;
       var v = row[c];
-      if (v instanceof Date) v = Utilities.formatDate(v, 'Asia/Tokyo', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+      if (v instanceof Date) v = formatDateTimeCell_(headers[c], v);
       if (v !== '' && v !== null && v !== undefined) isEmpty = false;
       obj[headers[c]] = normalizeCell_(v);
     }
@@ -738,7 +791,7 @@ function saveEntity_(sheetName, req, ctx) {
       existing = {};
       headers.forEach(function (h, idx) {
         var val = rowValues[idx];
-        if (val instanceof Date) val = val.toISOString();
+        if (val instanceof Date) val = formatDateTimeCell_(h, val);
         existing[h] = normalizeCell_(val);
       });
 
@@ -1272,6 +1325,10 @@ function setupBestOneProject() {
     log.push('[설정] TRIP_CODE = bestone (원하는 값으로 바꾸세요)');
   }
 
+  // 날짜/시각 값이 Google Sheets 에 의해 자동으로 잘못 바뀌어 있으면 복구합니다.
+  var repairLog = repairDateTimeColumns_(ss);
+  log.push(repairLog);
+
   log.push('=== setupBestOneProject 완료 ===');
   log.forEach(function (l) { Logger.log(l); });
   return log.join('\n');
@@ -1334,6 +1391,65 @@ function checkSetup() {
 
   lines.forEach(function (l) { Logger.log(l); });
   return lines.join('\n');
+}
+
+/**
+ * ★ 항공/일정 등의 날짜·시각이 이상하게 보일 때 실행하세요.
+ * (예: 탑승 시각이 "1899-12-30T08:47:08Z" 처럼 보이거나, 날짜가 "NaN"으로 보일 때)
+ *
+ * Google Sheets 가 "09:22" 같은 문자열을 시각으로 자동 인식해 Date 로 바꿔버리면
+ * 생기는 문제입니다. 이 함수는 이미 잘못 바뀐 값을 올바른 문자열로 되돌리고,
+ * 해당 컬럼을 "일반 텍스트" 서식으로 바꿔 앞으로 같은 문제가 생기지 않게 합니다.
+ * 여러 번 실행해도 안전합니다.
+ */
+function repairDateTimeColumns() {
+  var result = repairDateTimeColumns_(getSpreadsheet_());
+  Logger.log(result);
+  return result;
+}
+
+/** repairDateTimeColumns() 의 실제 동작. setupBestOneProject() 에서도 함께 호출됩니다. */
+function repairDateTimeColumns_(ss) {
+  var log = [];
+  Object.keys(SCHEMA).forEach(function (name) {
+    var sh = ss.getSheetByName(name);
+    if (!sh) return;
+    var headers = headersOf_(sh, name);
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return;
+
+    var targetCols = [];
+    headers.forEach(function (h, idx) {
+      if (DATE_ONLY_FIELDS_[h] || TIME_ONLY_FIELDS_[h]) targetCols.push({ header: h, col: idx + 1 });
+    });
+    if (!targetCols.length) return;
+
+    var fixedCount = 0;
+    targetCols.forEach(function (t) {
+      var range = sh.getRange(2, t.col, lastRow - 1, 1);
+      var values = range.getValues();
+      var changed = false;
+      var out = values.map(function (row) {
+        var v = row[0];
+        if (v instanceof Date) {
+          changed = true;
+          fixedCount++;
+          return [formatDateTimeCell_(t.header, v)];
+        }
+        return [v];
+      });
+      // 서식을 먼저 "일반 텍스트"로 바꾼 뒤에 고친 값을 다시 써야
+      // Sheets 가 다시 날짜/시각으로 자동 변환하지 않습니다.
+      range.setNumberFormat('@');
+      if (changed) range.setValues(out);
+    });
+
+    if (fixedCount) log.push('[복구] ' + name + ' 시트에서 ' + fixedCount + '칸을 고쳤습니다.');
+  });
+
+  if (!log.length) log.push('[확인] 고칠 값이 없습니다. 모든 날짜/시각이 정상입니다.');
+  log.unshift('=== repairDateTimeColumns 결과 ===');
+  return log.join('\n');
 }
 
 function quickSetupState_() {
