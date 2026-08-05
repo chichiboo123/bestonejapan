@@ -41,7 +41,7 @@ var SCHEMA = {
   ].concat(COMMON_TAIL),
 
   Flights: [
-    'id', 'tripId', 'date', 'airline', 'flightNo', 'depAirport', 'depTerminal', 'depTime',
+    'id', 'tripId', 'date', 'airline', 'flightNo', 'depAirport', 'depTerminal', 'boardingTime', 'depTime',
     'arrAirport', 'arrTerminal', 'arrTime', 'seat', 'baggage', 'bookingNumber', 'bookingSite',
     'ticketUrl', 'memo'
   ].concat(COMMON_TAIL),
@@ -1481,7 +1481,7 @@ function seedJapanData() {
     bulkAppend_('Flights', [
       merge({
         id: Utilities.getUuid(), date: d1, airline: '대한항공', flightNo: 'KE765',
-        depAirport: '인천(ICN)', depTerminal: '제2여객터미널', depTime: '09:20',
+        depAirport: '인천(ICN)', depTerminal: '제2여객터미널', boardingTime: '08:50', depTime: '09:20',
         arrAirport: '신치토세(CTS)', arrTerminal: '국제선', arrTime: '11:55',
         seat: '32A / 32B', baggage: '위탁 23kg x 1, 기내 10kg',
         bookingNumber: 'ABC123', bookingSite: 'https://www.koreanair.com/',
@@ -1489,7 +1489,7 @@ function seedJapanData() {
       }, common(true)),
       merge({
         id: Utilities.getUuid(), date: d3, airline: '대한항공', flightNo: 'KE766',
-        depAirport: '신치토세(CTS)', depTerminal: '국제선', depTime: '13:05',
+        depAirport: '신치토세(CTS)', depTerminal: '국제선', boardingTime: '12:35', depTime: '13:05',
         arrAirport: '인천(ICN)', arrTerminal: '제2여객터미널', arrTime: '16:45',
         seat: '30C / 30D', baggage: '위탁 23kg x 1',
         bookingNumber: 'ABC123', bookingSite: 'https://www.koreanair.com/',

@@ -31,13 +31,13 @@ const S = {
   tab: 'today',
   date: null,          // 일정 · 기록 · 사진 · 지출이 공유하는 '선택된 날짜'
   bookingTab: 'flight',
-  localTab: 'transit',
+  localTab: 'phrase',
   recordTab: 'day',
   filters: {
     phraseCat: 'all', phraseFav: false, phraseQ: '',
     wordCat: 'all', wordFav: false, wordQ: '',
     bookingType: 'all', bookingQ: '',
-    stationQ: '', busQ: '', routeQ: '', scheduleQ: ''
+    routeQ: '', scheduleQ: ''
   },
   transit: { city: 'tokyo', mode: 'route', from: null, to: null, result: null, searched: false, line: 0 },
   lastSync: null,
@@ -778,7 +778,8 @@ const ENTITIES = {
       { g: '출발' },
       { k: 'depAirport', l: '출발 공항', t: 'text', half: true, ph: '예: 인천(ICN)' },
       { k: 'depTerminal', l: '출발 터미널', t: 'text', half: true },
-      { k: 'depTime', l: '출발 시각', t: 'time' },
+      { k: 'boardingTime', l: '탑승 시각', t: 'time', half: true, hint: '탑승구에서 탑승을 시작하는 시각(보딩타임)' },
+      { k: 'depTime', l: '출발 시각', t: 'time', half: true },
       { g: '도착' },
       { k: 'arrAirport', l: '도착 공항', t: 'text', half: true, ph: '예: 신치토세(CTS)' },
       { k: 'arrTerminal', l: '도착 터미널', t: 'text', half: true },
@@ -897,62 +898,6 @@ const ENTITIES = {
       { k: 'ja', l: '일본어', t: 'text', req: true, ja: true },
       { k: 'reading', l: '읽는 법', t: 'text' },
       { k: 'ko', l: '한국어 뜻', t: 'text', req: true },
-      { k: 'memo', l: '메모', t: 'textarea' }
-    ]
-  },
-
-  station: {
-    list: 'stations', title: '역 정보', action: 'Station',
-    fields: [
-      { k: 'city', l: '도시', t: 'text', half: true, ph: '예: 삿포로' },
-      { k: 'nameKo', l: '한글 역명', t: 'text', half: true, req: true },
-      { k: 'nameJa', l: '일본어 역명', t: 'text', ja: true, half: true },
-      { k: 'nameEn', l: '영문 역명', t: 'text', half: true },
-      { k: 'lines', l: '노선명', t: 'text' },
-      { k: 'lineColor', l: '노선 색상', t: 'text', half: true, ph: '#2f6f4f' },
-      { k: 'stationNumber', l: '역 번호', t: 'text', half: true, ph: '예: N06' },
-      { g: '출구 · 시설' },
-      { k: 'exits', l: '주요 출구', t: 'textarea' },
-      { k: 'recommendedExit', l: '추천 출구', t: 'text' },
-      { k: 'transfers', l: '환승 노선', t: 'text' },
-      { k: 'elevator', l: '엘리베이터', t: 'text', half: true },
-      { k: 'coinLocker', l: '코인로커', t: 'text', half: true },
-      { k: 'toilet', l: '화장실', t: 'text', half: true },
-      { k: 'hotelRelation', l: '숙소와의 관계', t: 'text', half: true },
-      { k: 'nearby', l: '주변 관광지', t: 'textarea' },
-      { g: '링크' },
-      { k: 'mapUrl', l: '지도 링크', t: 'url' },
-      { k: 'officialSite', l: '공식 사이트', t: 'url' },
-      { k: 'photoUrl', l: '역 사진', t: 'image' },
-      { k: 'memo', l: '메모', t: 'textarea' }
-    ]
-  },
-
-  bus: {
-    list: 'buses', title: '버스 정보', action: 'Bus',
-    fields: [
-      { k: 'city', l: '도시', t: 'text', half: true },
-      { k: 'company', l: '버스 회사', t: 'text', half: true },
-      { k: 'lineName', l: '노선명 또는 번호', t: 'text', req: true },
-      { k: 'fromStop', l: '출발 정류장', t: 'text', half: true },
-      { k: 'toStop', l: '도착 정류장', t: 'text', half: true },
-      { k: 'fromStopJa', l: '출발 정류장(일본어)', t: 'text', ja: true, half: true },
-      { k: 'toStopJa', l: '도착 정류장(일본어)', t: 'text', ja: true, half: true },
-      { g: '타는 방법' },
-      { k: 'boardingPoint', l: '승차 위치', t: 'text' },
-      { k: 'boardingDoor', l: '앞문 / 뒷문 승차', t: 'select', options: opt(['앞문 승차', '뒷문 승차', '확인 필요']) },
-      { k: 'alightMethod', l: '하차 방식', t: 'text', ph: '예: 벨을 누르고 앞문으로 하차' },
-      { k: 'icCard', l: '교통카드 사용', t: 'select', options: opt(['사용 가능', '사용 불가', '확인 필요']) },
-      { k: 'needTicket', l: '정리권 필요 여부', t: 'select', options: opt(['필요', '불필요', '확인 필요']) },
-      { k: 'paymentMethod', l: '요금 지불 방식', t: 'text', ph: '예: 하차 시 지불' },
-      { g: '운행' },
-      { k: 'fare', l: '예상 요금', t: 'text', half: true },
-      { k: 'durationMinutes', l: '예상 소요(분)', t: 'number', half: true },
-      { k: 'firstBus', l: '첫차', t: 'text', half: true },
-      { k: 'lastBus', l: '막차', t: 'text', half: true },
-      { k: 'officialSite', l: '공식 사이트', t: 'url' },
-      { k: 'mapUrl', l: '지도 링크', t: 'url' },
-      { k: 'photoUrl', l: '정류장 사진', t: 'image' },
       { k: 'memo', l: '메모', t: 'textarea' }
     ]
   },
@@ -1789,7 +1734,8 @@ function todaySchedules(date) {
   const flightItems = S.flights.filter(f => f.date === date).map(f => ({
     id: 'flight-' + f.id, date: f.date, startTime: f.depTime, endTime: f.arrTime,
     category: 'flight', title: f.flightNo + ' ' + (f.depAirport || '') + ' → ' + (f.arrAirport || ''),
-    place: (f.depAirport || '') + (f.depTerminal ? ' ' + f.depTerminal : ''),
+    place: (f.depAirport || '') + (f.depTerminal ? ' ' + f.depTerminal : '') +
+      (f.boardingTime ? ' · 탑승 ' + f.boardingTime : ''),
     description: f.memo || '', _flight: f, _virtual: true
   }));
   // 이미 같은 편명의 일정이 있으면 중복 표시하지 않습니다.
@@ -2247,6 +2193,7 @@ function flightCard(f) {
     h('div', { class: 'li-sub', text: fmtDateKo(f.date, true) }),
     h('div', { class: 'mt8' }, [
       kv('출발', (f.depAirport || '') + (f.depTerminal ? ' / ' + f.depTerminal : '') + (f.depTime ? ' · ' + f.depTime : '')),
+      kv('탑승 시각', f.boardingTime),
       kv('도착', (f.arrAirport || '') + (f.arrTerminal ? ' / ' + f.arrTerminal : '') + (f.arrTime ? ' · ' + f.arrTime : '')),
       kv('좌석', f.seat),
       kv('수하물', f.baggage),
@@ -2489,74 +2436,7 @@ async function toggleFavorite(entityKey, rec) {
   catch (e) { /* 안내는 saveEntity 에서 */ }
 }
 
-function stationCard(st) {
-  const fav = truthy(st.favorite);
-  return h('div', { class: 'list-item' }, [
-    h('div', { class: 'li-head' }, [
-      h('div', { style: 'flex:1;min-width:0' }, [
-        h('div', { class: 'li-title', text: (st.nameKo || '') + (st.stationNumber ? ' (' + st.stationNumber + ')' : '') }),
-        h('div', { class: 'li-sub', style: "font-family:'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif", text: (st.nameJa || '') + (st.nameEn ? ' · ' + st.nameEn : '') }),
-        st.lines ? h('div', { class: 'li-sub', text: st.lines }) : null
-      ].filter(Boolean)),
-      h('button', { class: 'star-btn' + (fav ? ' on' : ''), 'aria-label': '즐겨찾기', onclick: () => toggleFavorite('station', st) },
-        mi(fav ? 'star' : 'star_border', fav ? 'filled' : ''))
-    ]),
-    h('div', { class: 'mt8' }, [
-      kv('추천 출구', st.recommendedExit),
-      kv('주요 출구', st.exits),
-      kv('환승', st.transfers),
-      kv('엘리베이터', st.elevator),
-      kv('코인로커', st.coinLocker),
-      kv('화장실', st.toilet),
-      kv('숙소 관계', st.hotelRelation),
-      kv('주변', st.nearby),
-      kv('메모', st.memo)
-    ].filter(Boolean)),
-    attachGallery(st.photoUrl, st.nameKo + ' 사진'),
-    h('div', { class: 'li-actions' }, [
-      mapBtn(st, st.nameJa || st.nameKo),
-      st.nameJa ? h('button', { class: 'btn btn-sm btn-star', text: '역명 크게 보기', onclick: () => openBigText(st.nameJa, st.nameKo) }) : null,
-      copyBtn('역명 복사', st.nameJa || st.nameKo),
-      linkBtn('공식 사이트', st.officialSite),
-      h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('station', st) })
-    ].filter(Boolean)),
-    h('div', { class: 'row-wrap mt8' }, [sampleBadge(st), authorBadge(st)].filter(Boolean))
-  ].filter(Boolean));
-}
 
-function busCard(b) {
-  return h('div', { class: 'list-item' }, [
-    h('div', { class: 'li-head' }, [
-      h('div', { class: 'li-title', text: (b.lineName || '') }),
-      sampleBadge(b)
-    ].filter(Boolean)),
-    h('div', { class: 'li-sub', text: (b.city ? b.city + ' · ' : '') + (b.company || '') }),
-    h('div', { class: 'li-sub mt8', text: (b.fromStop || '') + ' → ' + (b.toStop || '') }),
-    (b.fromStopJa || b.toStopJa) ? h('div', {
-      class: 'li-sub', style: "font-family:'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif",
-      text: (b.fromStopJa || '') + ' → ' + (b.toStopJa || '')
-    }) : null,
-    h('div', { class: 'mt8' }, [
-      kv('승차 위치', b.boardingPoint),
-      kv('승차 방식', b.boardingDoor),
-      kv('하차 방식', b.alightMethod),
-      kv('교통카드', b.icCard),
-      kv('정리권', b.needTicket),
-      kv('요금 지불', b.paymentMethod),
-      kv('예상 요금', b.fare),
-      kv('소요 시간', b.durationMinutes ? b.durationMinutes + '분' : ''),
-      kv('첫차 / 막차', (b.firstBus || '') + (b.lastBus ? ' / ' + b.lastBus : '')),
-      kv('메모', b.memo)
-    ].filter(Boolean)),
-    attachGallery(b.photoUrl, '정류장 사진'),
-    h('div', { class: 'li-actions' }, [
-      mapBtn(b, b.fromStopJa || b.fromStop),
-      b.toStopJa ? h('button', { class: 'btn btn-sm btn-star', text: '정류장 크게 보기', onclick: () => openBigText(b.toStopJa, b.toStop || '') }) : null,
-      linkBtn('공식 사이트', b.officialSite),
-      h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('bus', b) })
-    ].filter(Boolean))
-  ].filter(Boolean));
-}
 
 function routeCard(r) {
   let steps = [];
@@ -2611,11 +2491,9 @@ function renderLocal() {
   const nodes = [];
 
   const tabs = [
-    { k: 'transit', l: '노선 · 길찾기' },
     { k: 'phrase', l: CO.localLabels.phrases },
     { k: 'word', l: CO.localLabels.words },
-    { k: 'station', l: CO.localLabels.stations },
-    { k: 'bus', l: CO.localLabels.buses },
+    { k: 'transit', l: CO.localLabels.transit },
     { k: 'route', l: CO.localLabels.routes }
   ];
   const bar = h('div', { class: 'subtabs' });
@@ -2627,10 +2505,7 @@ function renderLocal() {
   });
   nodes.push(bar);
 
-  if (S.localTab === 'transit') {
-    renderTransit().forEach(n => nodes.push(n));
-
-  } else if (S.localTab === 'phrase') {
+  if (S.localTab === 'phrase') {
     nodes.push(searchBox('표현 검색 (한국어 · 일본어 · 읽는 법)', S.filters.phraseQ, v => { S.filters.phraseQ = v; renderLocal(); }));
     const chips = h('div', { class: 'chips' });
     chips.appendChild(h('button', {
@@ -2694,31 +2569,8 @@ function renderLocal() {
       nodes.push(emptyBox('단어가 없습니다', 'seedJapanData() 를 실행하면 기본 단어가 채워집니다.', 'menu_book'));
     }
 
-  } else if (S.localTab === 'station') {
-    nodes.push(searchBox('역 검색 (한글 · 일본어 · 노선 · 도시)', S.filters.stationQ, v => { S.filters.stationQ = v; renderLocal(); }));
-    const stq = normQ(S.filters.stationQ);
-    nodes.push(h('div', { class: 'section-head' }, [
-      h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '저장한 역']),
-      iconBtn('add', '역 추가', 'btn btn-sm', () => openEntityForm('station'))
-    ]));
-    const list = S.stations.slice()
-      .filter(st => matchQ(stq, [st.nameKo, st.nameJa, st.nameEn, st.lines, st.city, st.nearby, st.recommendedExit, st.memo]))
-      .sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
-    if (list.length) list.forEach(st => nodes.push(stationCard(st)));
-    else nodes.push(emptyBox('저장된 역이 없습니다', '여행에 필요한 역만 골라 저장해 두면 현지에서 빠르게 확인할 수 있습니다.', 'train'));
-    nodes.push(externalLinkCard());
-
-  } else if (S.localTab === 'bus') {
-    nodes.push(searchBox('버스 검색 (노선 · 정류장 · 회사)', S.filters.busQ, v => { S.filters.busQ = v; renderLocal(); }));
-    const bsq = normQ(S.filters.busQ);
-    nodes.push(h('div', { class: 'section-head' }, [
-      h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '버스 정보']),
-      iconBtn('add', '버스 추가', 'btn btn-sm', () => openEntityForm('bus'))
-    ]));
-    const buses = S.buses.filter(b => matchQ(bsq, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]));
-    if (buses.length) buses.forEach(b => nodes.push(busCard(b)));
-    else nodes.push(emptyBox('저장된 버스 정보가 없습니다', '지역마다 타는 방법이 다릅니다. 미리 적어 두면 든든합니다.', 'directions_bus'));
-    nodes.push(busGuideCard());
+  } else if (S.localTab === 'transit') {
+    renderTransit().forEach(n => nodes.push(n));
 
   } else {
     nodes.push(searchBox('경로 검색 (경로명 · 출발지 · 도착지)', S.filters.routeQ, v => { S.filters.routeQ = v; renderLocal(); }));
@@ -2737,7 +2589,7 @@ function renderLocal() {
   mount(view, nodes.filter(Boolean));
 
   const addMap = {
-    phrase: 'japanesePhrase', word: 'japaneseWord', station: 'station', bus: 'bus', route: 'route'
+    phrase: 'japanesePhrase', word: 'japaneseWord', route: 'route'
   };
   if (addMap[S.localTab]) {
     view.appendChild(h('button', {
@@ -2747,78 +2599,7 @@ function renderLocal() {
   }
 }
 
-/**
- * 지역별 버스 타는 방법 안내.
- * 시각표·요금은 자주 바뀌므로 담지 않고, 이용 방식과 공식 사이트만 정리합니다.
- */
-const BUS_GUIDE = [
-  {
-    city: '도쿄', color: '#4a6fa5',
-    rows: [
-      ['승차', '앞문으로 타고 바로 요금을 냅니다 (선불)'],
-      ['요금', '도영·민영버스 대부분 구간 상관없이 균일 요금'],
-      ['교통카드', 'Suica · PASMO 등 IC카드를 단말기에 터치'],
-      ['정리권', '필요 없습니다 (균일 요금 구간)'],
-      ['하차', '내릴 정류장 전에 벨을 누르고 뒷문으로 내립니다']
-    ],
-    links: [
-      { label: '도영버스 공식', url: 'https://www.kotsu.metro.tokyo.jp/bus/' },
-      { label: '도쿄 도영 노선 안내', url: 'https://tobus.jp/' }
-    ]
-  },
-  {
-    city: '삿포로 · 홋카이도', color: '#2f6f4f',
-    rows: [
-      ['승차', '뒷문(중간문)으로 타면서 정리권을 뽑습니다'],
-      ['요금', '탄 거리에 따라 올라갑니다 (거리 비례)'],
-      ['교통카드', 'Kitaca · Suica 등 사용 가능 (탈 때와 내릴 때 각각 터치)'],
-      ['정리권', '현금으로 낼 때 반드시 필요합니다'],
-      ['하차', '앞쪽 요금함에 정리권과 요금을 함께 넣고 앞문으로 내립니다'],
-      ['잔돈', '차내 요금함의 환전기에서 미리 바꿔 두세요 (1만엔권 불가)']
-    ],
-    links: [
-      { label: '홋카이도 중앙버스', url: 'https://www.chuo-bus.co.jp/' },
-      { label: '조테츠버스', url: 'https://www.jotetsu.co.jp/bus/' },
-      { label: '삿포로 시영교통(지하철·시전)', url: 'https://www.city.sapporo.jp/st/' }
-    ]
-  }
-];
 
-function busGuideCard() {
-  const wrap = h('div');
-  wrap.appendChild(h('div', { class: 'section-head' },
-    h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '버스 타는 법'])));
-
-  BUS_GUIDE.forEach(g => {
-    const card = h('div', { class: 'card card-tight' });
-    card.appendChild(h('div', { class: 'row mb8' }, [
-      h('span', { class: 'line-chip', style: 'background:' + g.color, text: g.city })
-    ]));
-    g.rows.forEach(r => { const n = kv(r[0], r[1]); if (n) card.appendChild(n); });
-    const links = h('div', { class: 'row-wrap mt8' });
-    g.links.forEach(l => links.appendChild(
-      iconBtn('open_in_new', l.label, 'btn btn-sm btn-ghost', () => openExternal(l.url))));
-    card.appendChild(links);
-    wrap.appendChild(card);
-  });
-
-  wrap.appendChild(h('p', { class: 'faint tiny mt8' },
-    '노선별 시각표와 요금은 자주 바뀌므로 앱에 담지 않았습니다. ' +
-    '위 공식 사이트나 구글 지도에서 확인한 내용을 아래에 직접 저장해 두세요.'));
-  return wrap;
-}
-
-function externalLinkCard() {
-  const card = h('div', { class: 'card card-tight' }, [
-    h('div', { class: 'faint mb8', text: '실시간 운행 정보는 공식 사이트에서 확인해 주세요.' })
-  ]);
-  const row = h('div', { class: 'row-wrap' });
-  CO.externalLinks.forEach(l => {
-    row.appendChild(h('button', { class: 'btn btn-sm btn-ghost', text: l.label, onclick: () => openExternal(l.url) }));
-  });
-  card.appendChild(row);
-  return card;
-}
 
 /* =========================================================================
  * 12-2. 노선도 · 길찾기 (오픈 데이터 기반)
@@ -3792,8 +3573,6 @@ function goLocal(tab, q) {
   S.localTab = tab;
   if (tab === 'phrase') S.filters.phraseQ = q || '';
   if (tab === 'word') S.filters.wordQ = q || '';
-  if (tab === 'station') S.filters.stationQ = q || '';
-  if (tab === 'bus') S.filters.busQ = q || '';
   if (tab === 'route') S.filters.routeQ = q || '';
   switchTab('local');
 }
@@ -3879,25 +3658,25 @@ function searchAll(rawQuery) {
       open: () => goLocal('word', rawQuery)
     })));
 
-  /* 역 */
-  add('station', CO.localLabels.stations, S.stations
-    .filter(st => matchQ(q, [st.nameKo, st.nameJa, st.nameEn, st.lines, st.city, st.nearby, st.recommendedExit, st.memo]))
-    .map(st => ({
-      title: st.nameKo,
-      sub: (st.nameJa || '') + (st.lines ? ' · ' + st.lines : ''),
-      badge: '역',
-      open: () => goLocal('station', st.nameKo)
-    })));
-
-  /* 버스 */
-  add('bus', CO.localLabels.buses, S.buses
-    .filter(b => matchQ(q, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]))
-    .map(b => ({
-      title: b.lineName,
-      sub: (b.fromStop || '') + ' → ' + (b.toStop || ''),
-      badge: '버스',
-      open: () => goLocal('bus', b.lineName)
-    })));
+  /* 역 (노선·길찾기 자료에서 검색) */
+  if (window.TRANSIT_DATA) {
+    const stationHits = [];
+    transitCities().forEach(city => {
+      searchStations(city.key, rawQuery, 6).forEach(st => {
+        stationHits.push({
+          title: st.ko,
+          sub: st.ja + (st.lines[0] ? ' · ' + st.lines[0].ko : ''),
+          badge: city.ko,
+          open: () => {
+            S.transit.city = city.key; S.transit.mode = 'route';
+            S.transit.from = st; S.transit.to = null; S.transit.result = null; S.transit.searched = false;
+            goLocal('transit');
+          }
+        });
+      });
+    });
+    add('station', '역 (노선·길찾기)', stationHits);
+  }
 
   /* 이동 경로 */
   add('route', CO.localLabels.routes, S.routes

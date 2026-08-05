@@ -45,10 +45,9 @@ const COUNTRY_CONFIG = {
 
   /** 현지 탭에서 사용할 이름들 (나라별로 자연스럽게 바꿀 수 있습니다) */
   localLabels: {
-    phrases: '일본어 표현',
-    words: '일본어 단어장',
-    stations: '역 정보',
-    buses: '버스 정보',
+    phrases: '회화',
+    words: '주요 어휘',
+    transit: '노선 · 길찾기',
     routes: '이동 경로'
   },
 
