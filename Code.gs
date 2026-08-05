@@ -369,6 +369,11 @@ function handleRequest_(req) {
       /* ------- 일정에 예약 추가 ------- */
       case 'addReservationToSchedule': return jsonOut_(apiReservationToSchedule_(req, ctx));
 
+      /* ------- AI 도우미 (키는 스크립트 속성에만 있습니다) ------- */
+      case 'aiChat':   return jsonOut_(apiAiChat_(req, ctx));
+      case 'aiModels': return jsonOut_(apiAiModels_(req, ctx));
+      case 'aiStatus': return jsonOut_(apiAiStatus_(req, ctx));
+
       default:
         return jsonOut_(fail_('UNKNOWN_ACTION', '알 수 없는 요청입니다: ' + action));
     }
@@ -1059,7 +1064,10 @@ function apiBootstrap_(ctx) {
     photos: readSheetObjects_('Photos', true),
     me: ctx.nickname,
     serverTime: new Date().toISOString(),
-    todayJst: todayJst_()
+    todayJst: todayJst_(),
+    // AI 도우미를 서버 키로 쓸 수 있는지 (키 자체는 절대 보내지 않습니다)
+    aiReady: aiServerReady_(),
+    aiModels: aiServerReady_() ? aiServerModels_() : []
   };
   return ok_(data, '');
 }
@@ -1248,6 +1256,267 @@ function logActivity_(nickname, action, target, detail) {
 }
 
 /* ============================================================
+ * 10-2. AI 도우미 (Google Gemini) 중계
+ * ------------------------------------------------------------
+ * ★ API 키를 브라우저에 두지 않기 위한 부분입니다.
+ *
+ *   [브라우저] --(세션 토큰)--> [이 스크립트] --(API 키)--> [Gemini]
+ *
+ * 키는 스크립트 속성 GEMINI_API_KEY 에만 있고, 브라우저로는 절대
+ * 내려가지 않습니다. 로그인한 사람만(= 유효한 세션 토큰이 있는 사람만)
+ * 이 기능을 쓸 수 있으므로, 주소를 안다고 해서 남이 내 키를 쓸 수 없습니다.
+ *
+ * 스크립트 속성 (프로젝트 설정 > 스크립트 속성)
+ *   GEMINI_API_KEY  : AI Studio 에서 만든 키 (필수)
+ *   GEMINI_MODELS   : 쉼표로 구분한 모델 순서 (선택, 없으면 아래 기본값)
+ *   GEMINI_BASE     : API 주소 (선택, 보통 건드리지 않습니다)
+ * ========================================================== */
+
+/** 스크립트 속성에 모델 순서가 없을 때 쓰는 기본값 */
+var AI_DEFAULT_MODELS_ = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash-lite'
+];
+
+var AI_BASE_DEFAULT_ = 'https://generativelanguage.googleapis.com/v1beta';
+
+/** 서버에 AI 키가 준비되어 있는지 */
+function aiServerReady_() {
+  return !!prop_('GEMINI_API_KEY', '');
+}
+
+function aiBase_() {
+  var b = String(prop_('GEMINI_BASE', AI_BASE_DEFAULT_) || AI_BASE_DEFAULT_);
+  return b.replace(/\/+$/, '');
+}
+
+/** 서버가 정한 모델 순서 */
+function aiServerModels_() {
+  var raw = prop_('GEMINI_MODELS', '');
+  if (!raw) return AI_DEFAULT_MODELS_.slice();
+  var list = String(raw).split(/[,\n]/).map(function (s) {
+    return String(s || '').trim().replace(/^models\//, '');
+  }).filter(Boolean);
+  return list.length ? list : AI_DEFAULT_MODELS_.slice();
+}
+
+/**
+ * 브라우저가 보낸 모델 이름은 그대로 믿지 않고 형태만 확인합니다.
+ * (이상한 문자가 섞여 다른 주소를 부르는 일이 없도록)
+ */
+function aiSanitizeModels_(arr) {
+  if (!arr || !arr.length) return [];
+  var out = [];
+  for (var i = 0; i < arr.length && out.length < 8; i++) {
+    var m = String(arr[i] || '').trim().replace(/^models\//, '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(m)) continue;
+    if (out.indexOf(m) < 0) out.push(m);
+  }
+  return out;
+}
+
+/**
+ * 실패 응답을 보고 "다음 모델로 넘어갈 것"과
+ * "넘어가도 소용없는 것(키 문제)"을 구분합니다.
+ */
+function aiClassifyError_(status, bodyText) {
+  var msg = '';
+  var gstatus = '';
+  try {
+    var j = JSON.parse(bodyText);
+    if (j && j.error) {
+      msg = String(j.error.message || '');
+      gstatus = String(j.error.status || '');
+    }
+  } catch (e) { /* 본문이 JSON 이 아닐 수 있습니다 */ }
+
+  if (/API_KEY_INVALID|API key not valid/i.test(bodyText) ||
+      status === 401 || gstatus === 'UNAUTHENTICATED') {
+    return { fatal: true, message: 'GEMINI_API_KEY 가 올바르지 않습니다. 스크립트 속성을 다시 확인해 주세요.' };
+  }
+  if (status === 403 || gstatus === 'PERMISSION_DENIED') {
+    return {
+      fatal: true,
+      message: 'API 키가 거부되었습니다. AI Studio 에서 키가 활성 상태인지, ' +
+               '키에 걸어둔 사용 제한이 이 스크립트를 막고 있지 않은지 확인해 주세요.'
+    };
+  }
+  return { fatal: false, message: msg || ('HTTP ' + status) };
+}
+
+/**
+ * AI 답변 요청. 키는 서버에만 있고 응답에도 포함하지 않습니다.
+ *
+ * 요청 형식
+ *   { action:'aiChat', token, system, contents:[{role,text}], models:[...], useSearch:true }
+ * 응답 형식
+ *   { text, model, index, total, grounded }
+ */
+function apiAiChat_(req, ctx) {
+  var key = prop_('GEMINI_API_KEY', '');
+  if (!key) {
+    return fail_('AI_NO_KEY',
+      '서버에 Gemini API 키가 없습니다. Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 ' +
+      'GEMINI_API_KEY 를 추가한 뒤 다시 시도해 주세요.');
+  }
+
+  // 모델 순서 : 사용자가 앱에서 고른 순서가 있으면 그것을 쓰고, 없으면 서버 기본값
+  var models = aiSanitizeModels_(req.models);
+  if (!models.length) models = aiServerModels_();
+  if (!models.length) return fail_('AI_NO_MODEL', '사용할 모델이 정해져 있지 않습니다.');
+
+  // 대화 내용 정리 (너무 긴 요청은 잘라냅니다)
+  var contents = [];
+  var src = req.contents || [];
+  for (var i = 0; i < src.length && i < 40; i++) {
+    var role = (src[i] && src[i].role === 'model') ? 'model' : 'user';
+    var text = String((src[i] && src[i].text) || '').substring(0, 8000);
+    if (!text) continue;
+    contents.push({ role: role, parts: [{ text: text }] });
+  }
+  if (!contents.length) return fail_('AI_NO_INPUT', '보낼 내용이 없습니다.');
+
+  var system = String(req.system || '').substring(0, 20000);
+  var useSearch = req.useSearch !== false;
+  var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1400, 128), 8192);
+
+  var base = aiBase_();
+  var errors = [];
+
+  for (var mi = 0; mi < models.length; mi++) {
+    var model = models[mi];
+
+    // 검색 도구를 켜고 먼저 시도 → 도구를 지원하지 않으면 끄고 한 번 더
+    var tries = useSearch ? [true, false] : [false];
+
+    for (var t = 0; t < tries.length; t++) {
+      var payload = {
+        contents: contents,
+        generationConfig: { temperature: 0.7, maxOutputTokens: maxTokens }
+      };
+      if (system) payload.systemInstruction = { parts: [{ text: system }] };
+      if (tries[t]) payload.tools = [{ google_search: {} }];
+
+      var url = base + '/models/' + encodeURIComponent(model) +
+                ':generateContent?key=' + encodeURIComponent(key);
+
+      var res, code, body;
+      try {
+        res = UrlFetchApp.fetch(url, {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify(payload),
+          muteHttpExceptions: true
+        });
+        code = res.getResponseCode();
+        body = res.getContentText();
+      } catch (err) {
+        errors.push(model + ': 연결 실패');
+        break;   // 연결 문제면 도구만 바꿔도 소용없으니 다음 모델로
+      }
+
+      if (code < 200 || code >= 300) {
+        // 검색 도구를 지원하지 않는 모델이면 도구 없이 다시 시도
+        if (tries[t] && /tool|google_search|function/i.test(body)) continue;
+        var info = aiClassifyError_(code, body);
+        if (info.fatal) return fail_('AI_KEY_ERROR', info.message);
+        errors.push(model + ': ' + info.message);
+        break;
+      }
+
+      var json;
+      try { json = JSON.parse(body); } catch (e2) {
+        errors.push(model + ': 응답 해석 실패');
+        break;
+      }
+
+      var cand = json.candidates && json.candidates[0];
+      var parts = (cand && cand.content && cand.content.parts) || [];
+      var out = '';
+      for (var p = 0; p < parts.length; p++) out += (parts[p].text || '');
+      out = out.replace(/^\s+|\s+$/g, '');
+
+      if (!out) {
+        errors.push(model + ': 빈 응답' + (cand && cand.finishReason ? ' (' + cand.finishReason + ')' : ''));
+        break;
+      }
+
+      return ok_({
+        text: out,
+        model: model,
+        index: mi,
+        total: models.length,
+        grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
+      }, '');
+    }
+  }
+
+  return fail_('AI_FAILED',
+    '모든 모델을 시도했지만 답을 받지 못했습니다.\n' + errors.join('\n'));
+}
+
+/**
+ * 서버 키로 실제 쓸 수 있는 모델 목록을 알려줍니다.
+ * (구글이 모델 이름을 바꿨을 때 앱에서 바로 확인할 수 있도록)
+ */
+function apiAiModels_(req, ctx) {
+  var key = prop_('GEMINI_API_KEY', '');
+  if (!key) {
+    return fail_('AI_NO_KEY',
+      '서버에 Gemini API 키가 없습니다. [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 추가해 주세요.');
+  }
+
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get('aiModelList');
+  if (cached && req.fresh !== true) {
+    try { return ok_({ models: JSON.parse(cached), cached: true }, ''); } catch (e) { /* 무시 */ }
+  }
+
+  var url = aiBase_() + '/models?pageSize=200&key=' + encodeURIComponent(key);
+  var res, code, body;
+  try {
+    res = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true });
+    code = res.getResponseCode();
+    body = res.getContentText();
+  } catch (err) {
+    return fail_('AI_LIST_FAILED', '모델 목록을 불러오지 못했습니다: 연결 실패');
+  }
+
+  if (code < 200 || code >= 300) {
+    var info = aiClassifyError_(code, body);
+    return fail_('AI_LIST_FAILED', info.message);
+  }
+
+  var json;
+  try { json = JSON.parse(body); } catch (e3) {
+    return fail_('AI_LIST_FAILED', '모델 목록 응답을 해석하지 못했습니다.');
+  }
+
+  var list = [];
+  var arr = json.models || [];
+  for (var i = 0; i < arr.length; i++) {
+    var methods = arr[i].supportedGenerationMethods || arr[i].supported_generation_methods || [];
+    if (methods.indexOf('generateContent') < 0) continue;
+    var name = String(arr[i].name || '').replace(/^models\//, '');
+    if (name) list.push(name);
+  }
+
+  try { cache.put('aiModelList', JSON.stringify(list), 1800); } catch (e4) { /* 무시 */ }
+  return ok_({ models: list, cached: false }, '');
+}
+
+/** 앱이 "서버 키가 준비됐는지 / 서버가 정한 모델 순서" 를 물어볼 때 */
+function apiAiStatus_(req, ctx) {
+  return ok_({
+    ready: aiServerReady_(),
+    models: aiServerReady_() ? aiServerModels_() : []
+  }, '');
+}
+
+/* ============================================================
  * 11. 설치 / 초기화 함수 (사용자가 직접 실행)
  * ========================================================== */
 
@@ -1364,6 +1633,15 @@ function setupBestOneProject() {
     log.push('[설정] TRIP_CODE = bestone (원하는 값으로 바꾸세요)');
   }
 
+  // AI 도우미 (선택 사항 - 없어도 나머지 기능은 모두 동작합니다)
+  if (!prop_('GEMINI_API_KEY', '')) {
+    log.push('[선택] GEMINI_API_KEY 가 없습니다. AI 도우미를 쓰려면 ' +
+             'https://aistudio.google.com/apikey 에서 키를 만들어 ' +
+             '[프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 로 추가해 주세요.');
+  } else {
+    log.push('[OK] GEMINI_API_KEY 가 설정되어 있습니다. (모델 순서: ' + aiServerModels_().join(' → ') + ')');
+  }
+
   // 날짜/시각 값이 Google Sheets 에 의해 자동으로 잘못 바뀌어 있으면 복구합니다.
   var repairLog = repairDateTimeColumns_(ss);
   log.push(repairLog);
@@ -1403,11 +1681,14 @@ function generatePasswordHash() {
 function checkSetup() {
   var lines = [];
   var p = props_().getProperties();
-  ['SPREADSHEET_ID', 'DRIVE_FOLDER_ID', 'TRIP_CODE', 'PASSWORD_SALT', 'PASSWORD_HASH', 'SESSION_DAYS', 'TRIP_ID']
+  ['SPREADSHEET_ID', 'DRIVE_FOLDER_ID', 'TRIP_CODE', 'PASSWORD_SALT', 'PASSWORD_HASH',
+   'SESSION_DAYS', 'TRIP_ID', 'GEMINI_API_KEY', 'GEMINI_MODELS']
     .forEach(function (k) {
       var v = p[k];
-      if (k === 'PASSWORD_HASH' && v) v = v.substring(0, 8) + '...(생략)';
-      lines.push((v ? '[OK] ' : '[없음] ') + k + ' = ' + (v || ''));
+      // 비밀 값은 앞 몇 글자만 보여줍니다 (로그에 그대로 남지 않도록)
+      if ((k === 'PASSWORD_HASH' || k === 'GEMINI_API_KEY') && v) v = v.substring(0, 8) + '...(생략)';
+      var optional = (k === 'GEMINI_API_KEY' || k === 'GEMINI_MODELS');
+      lines.push((v ? '[OK] ' : (optional ? '[선택] ' : '[없음] ')) + k + ' = ' + (v || ''));
     });
 
   try {

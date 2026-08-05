@@ -632,6 +632,8 @@ function applyBootstrap(data) {
   S.expenses         = data.expenses || [];
   S.photos           = data.photos || [];
   if (data.me) S.me = data.me;
+  // 서버(스크립트 속성)에 AI 키가 있는지 (키 자체는 내려오지 않습니다)
+  aiApplyServerStatus(data);
 }
 
 async function bootstrap(showSpinner) {
@@ -4033,7 +4035,7 @@ function openMenu() {
   const items = [
     { icon: 'luggage', label: '여행 기본 정보 수정', fn: () => { closeSheet(true); openEntityForm('trip', S.trip); } },
     { icon: 'search', label: '전체 검색', fn: () => { closeSheet(true); openGlobalSearch(''); } },
-    { icon: 'auto_awesome', label: 'AI 도우미 설정 (API 키)', fn: () => { closeSheet(true); openAiSettings(); } },
+    { icon: 'auto_awesome', label: 'AI 도우미 설정', fn: () => { closeSheet(true); openAiSettings(); } },
     { icon: 'refresh', label: '지금 새로고침', fn: async () => { closeSheet(true); await bootstrap(true); toast('최신 자료를 불러왔습니다.', 'ok'); } },
     { icon: 'edit_note', label: '임시 저장 (' + draftCount() + ')', fn: () => openDrafts() },
     { icon: 'dark_mode', label: '밝기 테마 바꾸기', fn: () => { toggleTheme(); } },
@@ -4079,18 +4081,24 @@ function toggleTheme() {
  * · 앱에 저장된 여행 정보(일정·항공·숙소·예약·기록 등)를 함께 보내
  *   "내일 몇 시에 나가야 해?" 같은 질문에 우리 데이터로 답합니다.
  * · 앱에 없는 내용은 구글 검색을 사용해 답합니다(지원 모델일 때).
- * · 모델은 config.js 의 AI_CONFIG.MODELS 순서대로 시도하고,
- *   없거나(404) 사용량이 꽉 차면(429/503) 자동으로 다음 모델로 넘어갑니다.
+ * · 모델은 정해진 순서대로 시도하고, 없거나(404) 사용량이 꽉 차면(429/503)
+ *   자동으로 다음 모델로 넘어갑니다.
  *
- * ※ API 키는 config.js 가 아니라 이 앱의 [AI 설정] 화면에서 넣습니다.
- *   키는 그 기기의 브라우저(localStorage)에만 저장되며 서버로 보내지 않습니다.
+ * ★ API 키를 두는 곳 (중요)
+ *   기본은 [서버 보관] 입니다.
+ *     Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 넣으면
+ *     이 앱은 Apps Script 를 거쳐 AI 를 부릅니다. 키는 브라우저로 절대 내려오지
+ *     않으므로, 앱 주소를 아는 사람이 키를 훔쳐갈 수 없습니다.
+ *   서버에 키가 없을 때만 [이 기기에만 저장] 방식으로 넘어갑니다.
+ *     이때는 브라우저(localStorage)에 넣은 키로 직접 Gemini 를 부릅니다.
+ *   어느 경우든 config.js 나 GitHub 저장소에는 키를 적지 않습니다.
  * ========================================================================= */
 
 const AI = CFG.AI_CONFIG;
 
 /** AI 관련 저장 키 */
 const AI_KEYS = {
-  apiKey: 'aiApiKey',
+  apiKey: 'aiApiKey',        // (예비 수단) 이 기기에만 저장하는 개인 키
   models: 'aiModels',        // 사용자가 고른 모델 순서
   lastGood: 'aiLastGood',    // 마지막으로 성공한 모델
   history: 'aiHistory'
@@ -4102,22 +4110,66 @@ const AIState = {
   messages: [],        // { role: 'user' | 'model', text, model?, grounded? }
   activeModel: '',     // 지금 쓰고 있는 모델
   modelIndex: -1,      // 목록에서 몇 번째인지 (배터리 표시용)
-  available: null      // [사용 가능한 모델 목록] 불러오기 결과
+  available: null,     // [사용 가능한 모델 목록] 불러오기 결과
+  serverReady: false,  // 서버(스크립트 속성)에 키가 있는지
+  serverModels: []     // 서버가 정한 기본 모델 순서
 };
 
+/** (예비 수단) 이 기기에만 저장해 둔 개인 키 */
 function aiApiKey() { return lsGet(AI_KEYS.apiKey, '') || ''; }
-function aiHasKey() { return !!aiApiKey(); }
 
-/** 실제로 시도할 모델 순서 (사용자가 고른 목록이 있으면 그것을 먼저 씁니다) */
+/** 서버 키를 쓸 수 있으면 서버 경유, 아니면 개인 키 직접 호출 */
+function aiUseServer() { return !!AIState.serverReady; }
+
+/** AI 를 쓸 준비가 되었는지 (둘 중 하나만 있으면 됩니다) */
+function aiHasKey() { return aiUseServer() || !!aiApiKey(); }
+
+/** 지금 어떤 방식으로 부르는지 (설정 화면 안내용) */
+function aiKeyMode() {
+  if (aiUseServer()) return 'server';
+  return aiApiKey() ? 'local' : 'none';
+}
+
+/** 로그인 직후 bootstrap 응답에서 서버 키 준비 상태를 받아 둡니다 */
+function aiApplyServerStatus(data) {
+  AIState.serverReady = !!(data && data.aiReady);
+  AIState.serverModels = (data && Array.isArray(data.aiModels)) ? data.aiModels : [];
+}
+
+/** 서버에 다시 물어봅니다 (스크립트 속성을 방금 바꿨을 때) */
+async function aiRefreshServerStatus() {
+  try {
+    const d = await api('aiStatus', {}, { retry: 0 });
+    aiApplyServerStatus({ aiReady: d.ready, aiModels: d.models });
+  } catch (e) { /* 예전 버전 서버면 이 action 이 없을 수 있습니다 */ }
+  return AIState.serverReady;
+}
+
+/**
+ * 실제로 시도할 모델 순서.
+ * 우선순위 : 내가 앱에서 고른 순서 → 서버가 정한 순서 → config.js 기본값
+ */
 function aiModels() {
   const custom = lsGet(AI_KEYS.models, null);
-  const list = (Array.isArray(custom) && custom.length) ? custom : (AI.MODELS || []);
+  let list;
+  if (Array.isArray(custom) && custom.length) list = custom;
+  else if (AIState.serverModels.length) list = AIState.serverModels;
+  else list = AI.MODELS || [];
+
   const lastGood = lsGet(AI_KEYS.lastGood, '');
   if (lastGood && list.indexOf(lastGood) > 0) {
     // 지난번에 성공한 모델을 맨 앞으로 (매번 없는 모델부터 두드리지 않도록)
     return [lastGood].concat(list.filter(m => m !== lastGood));
   }
   return list.slice();
+}
+
+/** 설정 화면에서 보여주고 편집하는 모델 순서 (성공 모델을 앞으로 당기지 않은 원본) */
+function aiEditableModels() {
+  const custom = lsGet(AI_KEYS.models, null);
+  if (Array.isArray(custom) && custom.length) return custom.slice();
+  if (AIState.serverModels.length) return AIState.serverModels.slice();
+  return (AI.MODELS || []).slice();
 }
 
 /* ---------- 앱 데이터를 AI 가 읽을 수 있는 요약으로 ---------- */
@@ -4273,11 +4325,76 @@ function aiParseError(status, bodyText) {
  * @returns {{text:string, model:string, index:number, grounded:boolean}}
  */
 async function aiGenerate(userText) {
-  const key = aiApiKey();
-  if (!key) throw new Error('NO_KEY');
-
   const models = aiModels();
   if (!models.length) throw new Error('NO_MODEL');
+
+  // 서버(스크립트 속성)에 키가 있으면 그쪽으로 보냅니다. 키는 브라우저에 없습니다.
+  if (aiUseServer()) return aiGenerateViaServer(userText, models);
+
+  // 서버에 키가 없을 때만 이 기기에 저장한 개인 키로 직접 부릅니다.
+  return aiGenerateDirect(userText, models);
+}
+
+/**
+ * [기본] Apps Script 를 거쳐서 부르기.
+ * 브라우저는 세션 토큰만 보내고, API 키는 서버 안에서만 쓰입니다.
+ */
+async function aiGenerateViaServer(userText, models) {
+  const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
+  const contents = turns.map(m => ({
+    role: m.role === 'user' ? 'user' : 'model',
+    text: m.text
+  }));
+  contents.push({ role: 'user', text: userText });
+
+  let data;
+  try {
+    data = await api('aiChat', {
+      system: aiSystemPrompt(),
+      contents: contents,
+      models: models,
+      useSearch: AI.USE_SEARCH !== false,
+      maxOutputTokens: AI.MAX_OUTPUT_TOKENS
+    }, { timeout: Math.max(AI.TIMEOUT_MS, 60000), retry: 0 });
+  } catch (err) {
+    // 서버가 알려준 이유를 그대로 보여줍니다.
+    const code = err && err.code;
+    if (code === 'AI_NO_KEY') {
+      // 방금 스크립트 속성을 지운 경우 등 - 개인 키가 있으면 그것으로 한 번 더
+      AIState.serverReady = false;
+      if (aiApiKey()) return aiGenerateDirect(userText, models);
+      const e = new Error('NO_KEY');
+      e.detail = err.message;
+      throw e;
+    }
+    if (code === 'AI_KEY_ERROR') {
+      const e = new Error('AI_FATAL');
+      e.detail = err.message;
+      throw e;
+    }
+    const e = new Error('AI_FAILED');
+    e.detail = (err && err.message) || '서버에서 답을 받지 못했습니다.';
+    throw e;
+  }
+
+  if (data.model) lsSet(AI_KEYS.lastGood, data.model);
+  return {
+    text: data.text,
+    model: data.model,
+    index: typeof data.index === 'number' ? data.index : 0,
+    total: data.total || models.length,
+    grounded: !!data.grounded,
+    via: 'server'
+  };
+}
+
+/**
+ * [예비] 이 기기에 저장한 개인 키로 브라우저가 직접 부르기.
+ * 서버에 키를 넣기 전까지 임시로 쓸 수 있습니다.
+ */
+async function aiGenerateDirect(userText, models) {
+  const key = aiApiKey();
+  if (!key) throw new Error('NO_KEY');
 
   // 최근 대화 (system 은 따로 보냄)
   const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
@@ -4361,7 +4478,8 @@ async function aiGenerate(userText) {
         model: model,
         index: i,
         total: models.length,
-        grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
+        grounded: !!(cand.groundingMetadata || cand.grounding_metadata),
+        via: 'local'
       };
     }
   }
@@ -4371,8 +4489,19 @@ async function aiGenerate(userText) {
   throw err;
 }
 
-/** 내 API 키로 실제 쓸 수 있는 모델 목록을 불러옵니다 */
+/** 실제 쓸 수 있는 모델 목록을 불러옵니다 (서버 키 우선) */
 async function aiListModels() {
+  if (aiUseServer()) {
+    try {
+      const d = await api('aiModels', { fresh: true }, { timeout: 45000, retry: 0 });
+      return d.models || [];
+    } catch (err) {
+      const e = new Error('LIST_FAILED');
+      e.detail = (err && err.message) || '서버에서 모델 목록을 받지 못했습니다.';
+      throw e;
+    }
+  }
+
   const key = aiApiKey();
   if (!key) throw new Error('NO_KEY');
   const res = await fetch(`${AI.API_BASE}/models?key=${encodeURIComponent(key)}&pageSize=200`);
@@ -4493,7 +4622,12 @@ async function aiSend() {
     lsSet(AI_KEYS.history, AIState.messages.slice(-40));
   } catch (err) {
     let msg;
-    if (err.message === 'NO_KEY') msg = 'API 키가 없습니다. 위 [설정] 에서 키를 넣어주세요.';
+    if (err.message === 'NO_KEY') {
+      msg = 'API 키가 아직 없습니다.\n\n' +
+        '· 권장: Apps Script → [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 넣고 다시 배포하세요.\n' +
+        '· 급하면: 위 ⚙ [설정] → [이 기기에만 저장] 에 키를 넣어 임시로 쓸 수 있습니다.' +
+        (err.detail ? '\n\n' + err.detail : '');
+    }
     else if (err.message === 'NO_MODEL') msg = '사용할 모델이 없습니다. [설정] 에서 모델을 골라주세요.';
     else if (err.message === 'AI_FATAL') msg = err.detail;
     else {
@@ -4589,31 +4723,89 @@ function openAiSettings() {
 
   box.appendChild(h('h3', { text: 'AI 도우미 설정' }));
 
-  /* --- API 키 --- */
-  box.appendChild(h('div', { class: 'form-group-title', text: 'Gemini API 키' }));
+  /* --- 1) 키를 어디에 두었는지 --- */
+  box.appendChild(h('div', { class: 'form-group-title', text: 'API 키 보관 위치' }));
+
+  const statusBox = h('div', { class: 'ai-key-status' });
+  const localBox = h('div', { class: 'ai-local-key' });
+
+  function drawStatus() {
+    clear(statusBox);
+    const mode = aiKeyMode();
+
+    if (mode === 'server') {
+      statusBox.appendChild(h('div', { class: 'ai-key-badge ok' }, [
+        mi('verified_user'),
+        h('div', {}, [
+          h('strong', { text: '서버에 안전하게 보관 중' }),
+          h('p', { class: 'tiny', text: 'Apps Script 의 스크립트 속성(GEMINI_API_KEY)에 있는 키를 사용합니다. 키는 이 기기로 내려오지 않습니다.' })
+        ])
+      ]));
+    } else {
+      statusBox.appendChild(h('div', { class: 'ai-key-badge warn' }, [
+        mi('lock_open'),
+        h('div', {}, [
+          h('strong', { text: '서버에 키가 없습니다' }),
+          h('p', { class: 'tiny' },
+            'Apps Script → [프로젝트 설정 > 스크립트 속성] 에 ' +
+            '이름 GEMINI_API_KEY, 값에 AI Studio 키를 넣고 다시 배포하면 ' +
+            '두 사람 모두 키를 따로 넣지 않고 쓸 수 있습니다.')
+        ])
+      ]));
+    }
+
+    // 서버 키가 있으면 개인 키 입력은 접어 둡니다(굳이 쓸 필요가 없으므로)
+    localBox.classList.toggle('hidden', mode === 'server' && !aiApiKey());
+  }
+
+  box.appendChild(statusBox);
+  box.appendChild(h('div', { class: 'row-wrap mt8' }, [
+    iconBtn('open_in_new', '스크립트 속성 넣는 법 (AI Studio)', 'btn btn-sm btn-ghost',
+      () => openExternal('https://aistudio.google.com/apikey')),
+    iconBtn('refresh', '서버 상태 다시 확인', 'btn btn-sm', async e => {
+      const btn = e && e.currentTarget;
+      if (btn) btn.disabled = true;
+      const ready = await aiRefreshServerStatus();
+      if (btn) btn.disabled = false;
+      drawStatus();
+      toast(ready ? '서버에 키가 준비되어 있습니다.' : '아직 서버에 키가 없습니다.', ready ? 'ok' : 'error');
+    })
+  ]));
+
+  /* --- 2) (예비) 이 기기에만 저장하는 개인 키 --- */
+  localBox.appendChild(h('div', { class: 'form-group-title mt16', text: '이 기기에만 저장 (예비 수단)' }));
+  localBox.appendChild(h('p', { class: 'hint' },
+    '서버에 키를 넣기 전까지 임시로 쓸 수 있습니다. 여기에 넣은 키는 이 브라우저에만 저장되고 ' +
+    'GitHub 에는 올라가지 않지만, 기기마다 따로 넣어야 합니다.'));
+
   const keyInput = h('input', { type: 'password', placeholder: 'AIza... 로 시작하는 키', 'aria-label': 'Gemini API 키' });
   keyInput.value = aiApiKey();
-  const keyRow = h('div', { class: 'row', style: 'gap:6px' }, [
+  localBox.appendChild(h('div', { class: 'row', style: 'gap:6px' }, [
     h('div', { style: 'flex:1' }, keyInput),
     h('button', {
       class: 'icon-btn', 'aria-label': '키 보기',
       onclick: () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; }
     }, mi('visibility'))
-  ]);
-  box.appendChild(keyRow);
-  box.appendChild(h('p', { class: 'hint' },
-    '키는 이 기기의 브라우저에만 저장되고, 우리 서버(Apps Script)나 GitHub 에는 올라가지 않습니다.'));
-
-  box.appendChild(h('div', { class: 'row-wrap mt8' }, [
-    iconBtn('open_in_new', 'AI Studio 에서 키 만들기', 'btn btn-sm btn-ghost',
-      () => openExternal('https://aistudio.google.com/apikey')),
-    iconBtn('save', '키 저장', 'btn btn-sm btn-primary', () => {
+  ]));
+  localBox.appendChild(h('div', { class: 'row-wrap mt8' }, [
+    iconBtn('save', '이 기기에 저장', 'btn btn-sm btn-primary', () => {
       const v = keyInput.value.trim();
-      if (!v) { lsDel(AI_KEYS.apiKey); toast('키를 지웠습니다.', 'ok'); return; }
+      if (!v) { lsDel(AI_KEYS.apiKey); drawStatus(); toast('키를 지웠습니다.', 'ok'); return; }
       lsSet(AI_KEYS.apiKey, v);
-      toast('API 키를 저장했습니다.', 'ok');
+      drawStatus();
+      toast('이 기기에 API 키를 저장했습니다.', 'ok');
     })
   ]));
+  box.appendChild(localBox);
+  drawStatus();
+
+  // 서버 키가 있으면 개인 키 칸을 펼치는 버튼만 둡니다.
+  if (aiKeyMode() === 'server' && !aiApiKey()) {
+    box.appendChild(h('button', {
+      class: 'btn btn-sm btn-ghost mt8', text: '이 기기에 개인 키 따로 넣기',
+      onclick: e => { localBox.classList.remove('hidden'); e.currentTarget.remove(); }
+    }));
+  }
 
   /* --- 모델 --- */
   box.appendChild(h('div', { class: 'form-group-title', text: '모델 순서' }));
@@ -4623,7 +4815,7 @@ function openAiSettings() {
   const listBox = h('div', { class: 'ai-model-list' });
   function drawModels() {
     clear(listBox);
-    const models = (lsGet(AI_KEYS.models, null) || AI.MODELS || []).slice();
+    const models = aiEditableModels().slice();
     models.forEach((m, i) => {
       listBox.appendChild(h('div', { class: 'ai-model-row' }, [
         h('span', { class: 'ai-model-no', text: String(i + 1) }),
@@ -4671,7 +4863,7 @@ function openAiSettings() {
           list.forEach(m => chips.appendChild(h('button', {
             class: 'chip', text: m,
             onclick: () => {
-              const cur = (lsGet(AI_KEYS.models, null) || AI.MODELS || []).slice();
+              const cur = aiEditableModels().slice();
               if (cur.indexOf(m) >= 0) { toast('이미 목록에 있습니다.', 'error'); return; }
               cur.push(m);
               lsSet(AI_KEYS.models, cur); lsDel(AI_KEYS.lastGood);
@@ -4685,7 +4877,7 @@ function openAiSettings() {
         clear(availBox);
         availBox.appendChild(h('p', { class: 'login-help', style: 'display:block' },
           err.message === 'NO_KEY'
-            ? '먼저 API 키를 저장해 주세요.'
+            ? '먼저 API 키를 넣어주세요. (스크립트 속성 GEMINI_API_KEY 또는 이 기기 저장)'
             : '모델 목록을 불러오지 못했습니다.\n' + (err.detail || err.message)));
       } finally {
         if (btn) btn.disabled = false;
@@ -4694,7 +4886,7 @@ function openAiSettings() {
     iconBtn('restart_alt', '기본값으로', 'btn btn-sm btn-ghost', () => {
       lsDel(AI_KEYS.models); lsDel(AI_KEYS.lastGood);
       drawModels();
-      toast('config.js 의 기본 순서로 되돌렸습니다.', 'ok');
+      toast(AIState.serverModels.length ? '서버가 정한 기본 순서로 되돌렸습니다.' : 'config.js 의 기본 순서로 되돌렸습니다.', 'ok');
     })
   ]));
   box.appendChild(availBox);
