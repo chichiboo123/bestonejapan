@@ -481,29 +481,51 @@ function entitySheet_(entity) {
  * 3. Script Properties / 스프레드시트 접근
  * ========================================================== */
 
+/* ---------- 한 번의 실행 안에서만 쓰는 기억 장치 ----------
+ * Apps Script 는 요청 한 번마다 새로 시작하므로, 아래 값들은
+ * "이번 요청 동안만" 유지됩니다. 같은 것을 두 번 읽지 않게 해
+ * 첫 화면 자료(getBootstrapData) 를 받는 시간을 크게 줄여줍니다.
+ */
+var RUN_CACHE_ = { props: null, ss: null, sheets: {}, rows: {} };
+
 function props_() {
   return PropertiesService.getScriptProperties();
 }
 
+/**
+ * 스크립트 속성 전체를 한 번만 읽어 기억해 둡니다.
+ * (키마다 따로 읽으면 읽는 횟수만큼 시간이 듭니다. 첫 화면에서만 20번 넘게 읽습니다)
+ */
+function allProps_() {
+  if (!RUN_CACHE_.props) RUN_CACHE_.props = props_().getProperties() || {};
+  return RUN_CACHE_.props;
+}
+
 function prop_(key, fallback) {
-  var v = props_().getProperty(key);
+  var v = allProps_()[key];
   return (v === null || v === undefined || v === '') ? (fallback === undefined ? '' : fallback) : v;
 }
 
+/** 스크립트 속성을 바꾼 뒤에는 기억해 둔 값을 지웁니다 */
+function forgetProps_() { RUN_CACHE_.props = null; }
+
 function getSpreadsheet_() {
+  if (RUN_CACHE_.ss) return RUN_CACHE_.ss;
   var id = prop_('SPREADSHEET_ID', '');
   if (!id) {
     // Script Properties 가 없으면 이 스크립트가 붙어있는 스프레드시트를 사용
     var active = SpreadsheetApp.getActiveSpreadsheet();
-    if (active) return active;
+    if (active) { RUN_CACHE_.ss = active; return active; }
     throw new Error('SPREADSHEET_ID 가 설정되지 않았습니다. 프로젝트 설정 > 스크립트 속성에서 추가해 주세요.');
   }
-  return SpreadsheetApp.openById(id);
+  RUN_CACHE_.ss = SpreadsheetApp.openById(id);
+  return RUN_CACHE_.ss;
 }
 
 /** 시트를 얻고, 없으면 헤더와 함께 만듭니다. */
 function getSheet_(name) {
   if (!SCHEMA[name]) throw new Error('정의되지 않은 시트입니다: ' + name);
+  if (RUN_CACHE_.sheets[name]) return RUN_CACHE_.sheets[name];
   var ss = getSpreadsheet_();
   var sh = ss.getSheetByName(name);
   if (!sh) {
@@ -513,6 +535,7 @@ function getSheet_(name) {
     sh.getRange(1, 1, 1, SCHEMA[name].length).setFontWeight('bold').setBackground('#f0ece1');
     protectDateTimeColumns_(sh, name, SCHEMA[name]);
   }
+  RUN_CACHE_.sheets[name] = sh;
   return sh;
 }
 
@@ -546,6 +569,26 @@ function headersOf_(sh, name) {
  * @param {boolean} skipDeleted isDeleted=true 인 행 제외 여부
  */
 function readSheetObjects_(name, skipDeleted) {
+  // 같은 요청 안에서 같은 시트를 여러 번 읽는 경우가 많습니다.
+  // (오늘 화면, 파일 권한 확인 등) 한 번만 읽고 나눠 씁니다.
+  var key = name + '|' + (skipDeleted ? '1' : '0');
+  if (RUN_CACHE_.rows[key]) return RUN_CACHE_.rows[key];
+  var rows = readSheetObjectsRaw_(name, skipDeleted);
+  RUN_CACHE_.rows[key] = rows;
+  return rows;
+}
+
+/** 시트 내용을 바꾼 뒤에는 기억해 둔 값을 지웁니다 */
+function forgetSheet_(name) {
+  if (name) {
+    delete RUN_CACHE_.rows[name + '|0'];
+    delete RUN_CACHE_.rows[name + '|1'];
+  } else {
+    RUN_CACHE_.rows = {};
+  }
+}
+
+function readSheetObjectsRaw_(name, skipDeleted) {
   var sh = getSheet_(name);
   var lastRow = sh.getLastRow();
   var lastCol = sh.getLastColumn();
@@ -850,6 +893,7 @@ function appendObject_(sheetName, obj) {
   });
   protectRowDateTimeColumns_(sh, sheetName, headers, sh.getLastRow() + 1);
   sh.appendRow(row);
+  forgetSheet_(sheetName);
   return obj;
 }
 
@@ -937,6 +981,7 @@ function saveEntity_(sheetName, req, ctx) {
       // (시트가 예전부터 있었거나, 이전 보호 범위 밖의 행이어도 항상 안전하게)
       protectRowDateTimeColumns_(sh, sheetName, headers, targetRow);
       sh.getRange(targetRow, 1, 1, headers.length).setValues([newRow]);
+      forgetSheet_(sheetName);
       logActivity_(ctx.nickname, 'UPDATE', sheetName, String(merged.id));
       return ok_({ record: merged, sheet: sheetName }, '저장되었습니다.');
 
@@ -963,6 +1008,7 @@ function saveEntity_(sheetName, req, ctx) {
       // 새로 추가되는 행은 이전 보호 범위를 벗어났을 수 있으므로 쓰기 직전에 다시 보호합니다.
       protectRowDateTimeColumns_(sh, sheetName, headers, sh.getLastRow() + 1);
       sh.appendRow(appendRowValues);
+      forgetSheet_(sheetName);
       logActivity_(ctx.nickname, 'CREATE', sheetName, String(fresh.id));
       return ok_({ record: fresh, sheet: sheetName }, '저장되었습니다.');
     }
@@ -1000,6 +1046,7 @@ function deleteEntity_(sheetName, req, ctx) {
           sh.getRange(row, upAtCol + 1).setNumberFormat('@');
           sh.getRange(row, upAtCol + 1).setValue(new Date().toISOString());
         }
+        forgetSheet_(sheetName);
         logActivity_(ctx.nickname, 'DELETE', sheetName, id);
         return ok_({ id: id, sheet: sheetName }, '삭제되었습니다.');
       }
@@ -1071,6 +1118,7 @@ function readTrip_() {
 
 function writeSetting_(key, value) {
   var sh = getSheet_('Settings');
+  forgetSheet_('Settings');
   var lastRow = sh.getLastRow();
   var nowIso = new Date().toISOString();
   if (lastRow >= 2) {
@@ -1530,61 +1578,136 @@ function cleanupStaleUploads() {
  * 요청: { action:'getFileData', token, fileId 또는 url }
  * 응답: { base64, mimeType, name, size }
  */
+/** 한 번의 응답으로 보낼 수 있는 최대 크기 */
+var FILE_CHUNK_MAX_ = 3 * 1024 * 1024;
+
 function apiGetFileData_(req, ctx) {
   var fileId = sanitizeText_(req.fileId, 120) || driveFileIdFromUrl_(req.url);
   if (!fileId) return fail_('NO_FILE', '파일을 찾을 수 없습니다.');
 
   // ---- 우리 여행에 속한 파일인지 확인 ----
   // (로그인만 했다고 해서 주인의 다른 Drive 파일까지 볼 수 있으면 안 됩니다)
-  if (!isOurDriveFile_(fileId)) {
+  // 결과를 캐시에 담아 두어, 조각을 여러 번 받을 때 시트를 다시 읽지 않습니다.
+  if (!isOurDriveFileCached_(fileId)) {
     return fail_('FORBIDDEN', '이 앱에서 올린 파일이 아니어서 열 수 없습니다.');
   }
 
-  var file;
-  try {
-    file = DriveApp.getFileById(fileId);
-  } catch (e) {
-    return fail_('NOT_FOUND', '파일이 삭제되었거나 접근할 수 없습니다.');
-  }
+  // ---- 파일 정보 (이름 · 형식 · 크기) ----
+  // 예전에는 조각마다 파일 전체를 통째로 메모리에 올렸습니다(getBlob().getBytes()).
+  // 6MB PDF 를 세 조각으로 받으면 18MB 를 읽는 셈이라 매우 느렸습니다.
+  // 지금은 크기만 먼저 확인하고, 필요한 구간만 잘라서 받아옵니다.
+  var meta = fileMetaCached_(fileId);
+  if (!meta) return fail_('NOT_FOUND', '파일이 삭제되었거나 접근할 수 없습니다.');
 
-  var size = 0;
-  try { size = file.getSize(); } catch (e2) { size = 0; }
+  var total = meta.size;
 
-  var blob = file.getBlob();
-  var bytes = blob.getBytes();
-  var mimeType = blob.getContentType() || 'application/octet-stream';
-
-  // ---- 조각으로 나눠 받기 (영상처럼 큰 파일용) ----
-  // offset/length 를 주면 그 부분만 보냅니다. 주지 않으면 전체를 보냅니다.
+  // ---- 조각으로 나눠 받기 ----
+  // offset/length 를 주면 그 부분만 보냅니다. 주지 않으면 앞에서부터 보냅니다.
   var offset = parseInt(req.offset, 10);
   var length = parseInt(req.length, 10);
-  var CHUNK_MAX = 3 * 1024 * 1024;      // 한 번에 보낼 수 있는 최대 크기
 
   if (isNaN(offset) || offset < 0) offset = 0;
-  if (isNaN(length) || length <= 0) length = bytes.length - offset;
-  if (length > CHUNK_MAX) length = CHUNK_MAX;
-  if (offset + length > bytes.length) length = bytes.length - offset;
+  if (offset > total) offset = total;
+  if (isNaN(length) || length <= 0) length = total - offset;
+  if (length > FILE_CHUNK_MAX_) length = FILE_CHUNK_MAX_;
+  if (offset + length > total) length = total - offset;
   if (length < 0) length = 0;
 
-  // 전체를 한 번에 달라고 했는데 너무 크면, 조각으로 나눠 달라고 알려줍니다.
-  if (offset === 0 && length === bytes.length && bytes.length > CHUNK_MAX) {
-    length = CHUNK_MAX;
-  }
-
-  var part = (offset === 0 && length === bytes.length)
-    ? bytes
-    : bytes.slice(offset, offset + length);
+  var part = driveReadRange_(fileId, offset, length);
+  if (part === null) return fail_('READ_FAILED', '파일을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요.');
 
   return ok_({
     fileId: fileId,
-    name: file.getName(),
-    mimeType: mimeType,
-    size: bytes.length,
+    name: meta.name,
+    mimeType: meta.mimeType,
+    size: total,
     offset: offset,
-    length: length,
-    done: (offset + length) >= bytes.length,
+    length: part.length,
+    chunkMax: FILE_CHUNK_MAX_,
+    done: (offset + part.length) >= total,
     base64: Utilities.base64Encode(part)
   }, '');
+}
+
+/**
+ * 파일의 [offset, offset+length) 구간만 읽어옵니다.
+ *
+ * 1순위: Drive REST 에 Range 헤더를 붙여 필요한 부분만 받습니다(가장 빠름).
+ * 2순위: 그래도 안 되면 예전처럼 전체를 읽어 잘라 씁니다.
+ */
+function driveReadRange_(fileId, offset, length) {
+  if (length <= 0) return [];
+
+  try {
+    var res = UrlFetchApp.fetch(
+      'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) +
+      '?alt=media&supportsAllDrives=true',
+      {
+        method: 'get',
+        headers: {
+          Authorization: 'Bearer ' + ScriptApp.getOAuthToken(),
+          Range: 'bytes=' + offset + '-' + (offset + length - 1)
+        },
+        muteHttpExceptions: true
+      });
+    var code = res.getResponseCode();
+    if (code === 206 || code === 200) {
+      var got = res.getContent();
+      // 206 이 아니라 200 이면 서버가 전체를 보냈다는 뜻이므로 직접 잘라냅니다.
+      if (code === 200 && got.length > length) return got.slice(offset, offset + length);
+      return got;
+    }
+  } catch (e) { /* 아래 예비 방법으로 넘어갑니다 */ }
+
+  try {
+    var bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+    return bytes.slice(offset, Math.min(offset + length, bytes.length));
+  } catch (e2) {
+    return null;
+  }
+}
+
+/** 파일 이름 · 형식 · 크기를 6시간 동안 기억해 둡니다 (조각마다 다시 묻지 않도록) */
+function fileMetaCached_(fileId) {
+  var cache = null;
+  var key = 'fmeta_' + fileId;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* 캐시를 못 써도 아래에서 직접 읽습니다 */ }
+
+  var meta;
+  try {
+    var file = DriveApp.getFileById(fileId);
+    meta = {
+      name: file.getName(),
+      mimeType: file.getMimeType() || 'application/octet-stream',
+      size: file.getSize() || 0
+    };
+  } catch (e2) {
+    return null;
+  }
+
+  try { if (cache) cache.put(key, JSON.stringify(meta), 21600); } catch (e3) { /* 무시 */ }
+  return meta;
+}
+
+/** "우리 파일이 맞다"는 확인 결과를 6시간 동안 기억해 둡니다 */
+function isOurDriveFileCached_(fileId) {
+  var cache = null;
+  var key = 'fown_' + fileId;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit === '1') return true;
+    if (hit === '0') return false;
+  } catch (e) { /* 무시 */ }
+
+  var ours = isOurDriveFile_(fileId);
+  // 아닌 경우는 짧게만 기억합니다 (방금 올린 파일이 시트에 늦게 반영될 수 있으므로)
+  try { if (cache) cache.put(key, ours ? '1' : '0', ours ? 21600 : 60); } catch (e2) { /* 무시 */ }
+  return ours;
 }
 
 /** 여러 형태의 Drive 주소에서 파일 ID 만 뽑아냅니다 */
@@ -1646,60 +1769,67 @@ function logActivity_(nickname, action, target, detail) {
 }
 
 /* ============================================================
- * 10-2. AI 도우미 (Google Gemini) 중계
+ * 10-2. AI 도우미 (Groq) 중계
  * ------------------------------------------------------------
  * ★ API 키를 브라우저에 두지 않기 위한 부분입니다.
  *
- *   [브라우저] --(세션 토큰)--> [이 스크립트] --(API 키)--> [Gemini]
+ *   [브라우저] --(세션 토큰)--> [이 스크립트] --(API 키)--> [Groq]
  *
- * 키는 스크립트 속성 GEMINI_API_KEY 에만 있고, 브라우저로는 절대
+ * 키는 스크립트 속성 GROQ_API_KEY 에만 있고, 브라우저로는 절대
  * 내려가지 않습니다. 로그인한 사람만(= 유효한 세션 토큰이 있는 사람만)
  * 이 기능을 쓸 수 있으므로, 주소를 안다고 해서 남이 내 키를 쓸 수 없습니다.
  *
  * 스크립트 속성 (프로젝트 설정 > 스크립트 속성)
- *   GEMINI_API_KEY  : AI Studio 에서 만든 키 (필수)
- *   GEMINI_MODELS   : 쉼표로 구분한 모델 순서 (선택, 없으면 아래 기본값)
- *   GEMINI_BASE     : API 주소 (선택, 보통 건드리지 않습니다)
+ *   GROQ_API_KEY  : console.groq.com 에서 만든 키 (필수, gsk_ 로 시작)
+ *   GROQ_MODELS   : 쉼표로 구분한 모델 순서 (선택, 없으면 아래 기본값)
+ *   GROQ_BASE     : API 주소 (선택, 보통 건드리지 않습니다)
+ *
+ * ※ 예전에 쓰던 GEMINI_API_KEY 가 남아 있어도 지장은 없습니다.
+ *   이 코드는 GROQ_API_KEY 만 봅니다.
  * ========================================================== */
 
-/** 스크립트 속성에 모델 순서가 없을 때 쓰는 기본값 */
-/*
+/**
+ * 스크립트 속성에 모델 순서가 없을 때 쓰는 기본값.
+ *
  * 앱은 먼저 "이 키로 실제 쓸 수 있는 모델 목록"을 확인한 뒤,
  * 아래 목록 중 존재하는 것만 순서대로 시도합니다.
  * 없는 이름은 두드려 보지도 않으므로 그냥 적어두어도 손해가 없습니다.
  *
- * "-latest" 로 끝나는 이름은 구글이 모델 이름을 바꿔도 그대로 남기 때문에
- * 가장 안전합니다. 그래서 맨 앞에 두었습니다.
+ * 고른 이유
+ *   openai/gpt-oss-120b : Groq 무료 등급에서 하루 토큰 한도가 가장 넉넉하고
+ *                         (하루 20만 토큰) 품질도 가장 좋은 편입니다. 첫 번째.
+ *   openai/gpt-oss-20b  : 더 가볍고 빨라서 120b 가 한도에 걸렸을 때 이어받습니다.
+ *   qwen/qwen3.6-27b    : 위 둘이 모두 막혔을 때를 위한 예비.
  */
 var AI_DEFAULT_MODELS_ = [
-  'gemini-flash-lite-latest',   // 이름이 바뀌어도 계속 동작
-  'gemini-flash-latest',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-2.0-flash',
-  // ↓ 아직 없는 이름들. 나중에 생기면 자동으로 먼저 쓰이게 됩니다.
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite'
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.6-27b'
 ];
 
-var AI_BASE_DEFAULT_ = 'https://generativelanguage.googleapis.com/v1beta';
+var AI_BASE_DEFAULT_ = 'https://api.groq.com/openai/v1';
 
 /** 서버에 AI 키가 준비되어 있는지 */
 function aiServerReady_() {
-  return !!prop_('GEMINI_API_KEY', '');
+  return !!aiKey_();
+}
+
+/** 스크립트 속성에 넣어둔 Groq 키 */
+function aiKey_() {
+  return prop_('GROQ_API_KEY', '');
 }
 
 function aiBase_() {
-  var b = String(prop_('GEMINI_BASE', AI_BASE_DEFAULT_) || AI_BASE_DEFAULT_);
+  var b = String(prop_('GROQ_BASE', AI_BASE_DEFAULT_) || AI_BASE_DEFAULT_);
   return b.replace(/\/+$/, '');
 }
 
 /** 서버가 정한 모델 순서 */
 function aiServerModels_() {
-  var raw = prop_('GEMINI_MODELS', '');
+  var raw = prop_('GROQ_MODELS', '');
   if (!raw) return AI_DEFAULT_MODELS_.slice();
   var list = String(raw).split(/[,\n]/).map(function (s) {
-    return String(s || '').trim().replace(/^models\//, '');
+    return String(s || '').trim();
   }).filter(Boolean);
   return list.length ? list : AI_DEFAULT_MODELS_.slice();
 }
@@ -1707,16 +1837,22 @@ function aiServerModels_() {
 /**
  * 브라우저가 보낸 모델 이름은 그대로 믿지 않고 형태만 확인합니다.
  * (이상한 문자가 섞여 다른 주소를 부르는 일이 없도록)
+ * Groq 이름에는 openai/gpt-oss-120b 처럼 "/" 가 들어갑니다.
  */
 function aiSanitizeModels_(arr) {
   if (!arr || !arr.length) return [];
   var out = [];
   for (var i = 0; i < arr.length && out.length < 8; i++) {
-    var m = String(arr[i] || '').trim().replace(/^models\//, '');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(m)) continue;
+    var m = String(arr[i] || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,70}$/.test(m)) continue;
     if (out.indexOf(m) < 0) out.push(m);
   }
   return out;
+}
+
+/** 검색 도구(browser_search)를 쓸 수 있는 모델인지 */
+function aiSupportsSearch_(model) {
+  return /gpt-oss/i.test(String(model || ''));
 }
 
 /**
@@ -1725,65 +1861,69 @@ function aiSanitizeModels_(arr) {
  */
 function aiClassifyError_(status, bodyText) {
   var msg = '';
-  var gstatus = '';
+  var code = '';
   try {
     var j = JSON.parse(bodyText);
     if (j && j.error) {
       msg = String(j.error.message || '');
-      gstatus = String(j.error.status || '');
+      code = String(j.error.code || j.error.type || '');
     }
   } catch (e) { /* 본문이 JSON 이 아닐 수 있습니다 */ }
 
-  if (/API_KEY_INVALID|API key not valid/i.test(bodyText) ||
-      status === 401 || gstatus === 'UNAUTHENTICATED') {
-    return { fatal: true, message: 'GEMINI_API_KEY 가 올바르지 않습니다. 스크립트 속성을 다시 확인해 주세요.' };
-  }
-  if (status === 403 || gstatus === 'PERMISSION_DENIED') {
+  if (status === 401 || /invalid_api_key|Invalid API Key/i.test(bodyText)) {
     return {
       fatal: true,
-      message: 'API 키가 거부되었습니다. AI Studio 에서 키가 활성 상태인지, ' +
-               '키에 걸어둔 사용 제한이 이 스크립트를 막고 있지 않은지 확인해 주세요.'
+      message: 'GROQ_API_KEY 가 올바르지 않습니다.\n' +
+               'Apps Script [프로젝트 설정 > 스크립트 속성] 의 값을 다시 확인해 주세요. ' +
+               '(gsk_ 로 시작하는 키입니다)'
+    };
+  }
+  if (status === 403) {
+    return {
+      fatal: true,
+      message: 'API 키가 거부되었습니다. console.groq.com 에서 키가 살아 있는지 확인해 주세요.'
     };
   }
 
   // ---- 사용량(할당량) 문제 ----
-  if (status === 429 || gstatus === 'RESOURCE_EXHAUSTED') {
-    // "limit: 0" 은 "잠깐 많이 썼다"가 아니라
-    // "이 키에는 애초에 쓸 수 있는 양이 없다"는 뜻입니다.
-    // 다른 모델로 바꿔도 똑같이 막히므로 즉시 멈춥니다.
-    if (/limit:\s*0\b/.test(bodyText)) {
-      return { fatal: true, noQuota: true, message: AI_NO_QUOTA_MSG_ };
-    }
-    var wait = bodyText.match(/retry in ([0-9.]+)s/i);
+  if (status === 429 || /rate_limit/i.test(code)) {
+    // 하루 한도를 다 쓴 경우에는 다른 모델로 바꾸면 이어서 쓸 수 있습니다.
+    var wait = bodyText.match(/try again in ([0-9.]+)(m|s)/i);
+    var sec = 0;
+    if (wait) sec = Math.ceil(parseFloat(wait[1]) * (wait[2].toLowerCase() === 'm' ? 60 : 1));
+    var perDay = /per day|RPD|TPD/i.test(bodyText);
     return {
-      fatal: false, retryable: true,
-      retryAfter: wait ? Math.ceil(parseFloat(wait[1])) : 0,
-      message: '사용량이 잠시 가득 찼습니다' + (wait ? ' (약 ' + Math.ceil(parseFloat(wait[1])) + '초 뒤 가능)' : '')
+      fatal: false, retryable: !perDay, retryAfter: sec, quota: perDay,
+      message: perDay
+        ? '오늘 쓸 수 있는 양을 다 썼습니다 (하루 한도)'
+        : '사용량이 잠시 가득 찼습니다' + (sec ? ' (약 ' + sec + '초 뒤 가능)' : '')
     };
   }
 
-  // ---- 더 이상 새로 쓸 수 없는(퇴역한) 모델 ----
-  if (/no longer available|is deprecated|has been (deprecated|retired)/i.test(msg)) {
-    return { fatal: false, retired: true, message: '이제 새로 쓸 수 없는 모델입니다' };
+  // ---- 더 이상 쓸 수 없는(내려간) 모델 ----
+  if (status === 404 ||
+      /decommission|no longer supported|does not exist|model_not_found/i.test(msg + ' ' + code)) {
+    return { fatal: false, retired: true, message: '이제 쓸 수 없는 모델입니다' };
+  }
+
+  // ---- 도구(browser_search)를 못 쓰는 경우 ----
+  if (/tool|browser_search/i.test(msg)) {
+    return { fatal: false, noTool: true, message: msg || '이 모델은 검색 도구를 지원하지 않습니다' };
   }
 
   return { fatal: false, message: msg || ('HTTP ' + status) };
 }
 
-/** 무료 사용량이 0으로 잡힌 키를 만났을 때 보여줄 안내 */
+/** 무료 한도를 다 썼을 때 보여줄 안내 */
 var AI_NO_QUOTA_MSG_ =
-  '이 API 키로는 AI 를 쓸 수 없습니다. (무료 사용량이 0으로 잡혀 있습니다)\n\n' +
-  '모델을 바꿔도 똑같이 막히므로, 키를 새로 만드는 것이 가장 빠릅니다.\n\n' +
-  '[해결 방법]\n' +
-  '1. https://aistudio.google.com/apikey 에 접속합니다.\n' +
-  '2. [Create API key] → 프로젝트를 고르는 화면이 나오면\n' +
-  '   반드시 "Create API key in new project"(새 프로젝트) 를 고릅니다.\n' +
-  '   ← 기존 Google Cloud 프로젝트에 만든 키는 무료 사용량이 0인 경우가 많습니다.\n' +
-  '3. 새로 만든 AIza... 키를 Apps Script 의\n' +
-  '   [프로젝트 설정 > 스크립트 속성] 의 GEMINI_API_KEY 값에 덮어씁니다.\n' +
-  '4. [배포 > 배포 관리 > ✏️ > 새 버전 > 배포] 로 다시 배포합니다.\n\n' +
-  '그래도 0 이라면 그 프로젝트는 무료 사용량 대상이 아닙니다.\n' +
-  'Google Cloud 콘솔에서 결제를 연결하면 유료로 쓸 수 있습니다.';
+  '오늘 쓸 수 있는 AI 사용량을 모두 썼습니다.\n\n' +
+  'Groq 무료 등급은 모델마다 하루 한도가 따로 있습니다.\n' +
+  '내일이 되면 자동으로 다시 쓸 수 있습니다.\n\n' +
+  '[지금 바로 쓰고 싶다면]\n' +
+  '1. 앱의 ✨ → ⚙ [설정] 에서 다른 모델을 위로 올려 보세요.\n' +
+  '   (모델마다 한도가 따로라서 하나가 막혀도 다른 것은 됩니다)\n' +
+  '2. console.groq.com/settings/billing 에서 카드를 등록하면\n' +
+  '   한도가 약 10배로 늘어납니다. (최소 결제 금액은 없습니다)';
 
 /**
  * AI 답변 요청. 키는 서버에만 있고 응답에도 포함하지 않습니다.
@@ -1794,11 +1934,11 @@ var AI_NO_QUOTA_MSG_ =
  *   { text, model, index, total, grounded }
  */
 function apiAiChat_(req, ctx) {
-  var key = prop_('GEMINI_API_KEY', '');
+  var key = aiKey_();
   if (!key) {
     return fail_('AI_NO_KEY',
-      '서버에 Gemini API 키가 없습니다. Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 ' +
-      'GEMINI_API_KEY 를 추가한 뒤 다시 시도해 주세요.');
+      '서버에 Groq API 키가 없습니다. Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 ' +
+      'GROQ_API_KEY 를 추가한 뒤 다시 배포해 주세요.');
   }
 
   // 모델 순서 : 사용자가 앱에서 고른 순서가 있으면 그것을 쓰고, 없으면 서버 기본값
@@ -1806,25 +1946,29 @@ function apiAiChat_(req, ctx) {
   if (!models.length) models = aiServerModels_();
   if (!models.length) return fail_('AI_NO_MODEL', '사용할 모델이 정해져 있지 않습니다.');
 
-  // 대화 내용 정리 (너무 긴 요청은 잘라냅니다)
-  var contents = [];
+  // ---- 대화 내용 정리 (너무 긴 요청은 잘라냅니다) ----
+  var messages = [];
+  var system = String(req.system || '').substring(0, 20000);
+  if (system) messages.push({ role: 'system', content: system });
+
   var src = req.contents || [];
   for (var i = 0; i < src.length && i < 40; i++) {
-    var role = (src[i] && src[i].role === 'model') ? 'model' : 'user';
+    // Groq(OpenAI 형식)에서는 model 이 아니라 assistant 라고 부릅니다.
+    var role = (src[i] && src[i].role === 'model') ? 'assistant' : 'user';
+    if (src[i] && src[i].role === 'assistant') role = 'assistant';
     var text = String((src[i] && src[i].text) || '').substring(0, 8000);
     if (!text) continue;
-    contents.push({ role: role, parts: [{ text: text }] });
+    messages.push({ role: role, content: text });
   }
-  if (!contents.length) return fail_('AI_NO_INPUT', '보낼 내용이 없습니다.');
+  if (messages.length === (system ? 1 : 0)) return fail_('AI_NO_INPUT', '보낼 내용이 없습니다.');
 
-  var system = String(req.system || '').substring(0, 20000);
   var useSearch = req.useSearch !== false;
-  var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1400, 128), 8192);
+  var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1200, 128), 8192);
 
-  var opts = { system: system, useSearch: useSearch, maxTokens: maxTokens };
+  var opts = { useSearch: useSearch, maxTokens: maxTokens };
 
   // ---- 실제로 쓸 수 있는 모델만 남깁니다 ----
-  // AI Studio 는 모델 이름을 자주 바꾸므로, 지금 이 키로 부를 수 있는 목록을
+  // Groq 도 모델을 자주 갈아치우므로, 지금 이 키로 부를 수 있는 목록을
   // 먼저 확인해서 없는 이름은 아예 두드리지 않습니다. (30분 동안 기억합니다)
   var avail = aiCachedModelList_(key);
   var tried = models;
@@ -1843,10 +1987,9 @@ function apiAiChat_(req, ctx) {
   // 그리고 한 번에 세 개까지만 시도해 오래 기다리는 일이 없게 합니다.
   tried = aiOrderForAttempt_(tried).slice(0, AI_MAX_ATTEMPTS_);
 
-  var run = aiRunModels_(key, tried, contents, opts);
+  var run = aiRunModels_(key, tried, messages, opts);
   aiRememberRetired_(run.retired);
 
-  if (run.noQuota) return fail_('AI_NO_QUOTA', run.fatal);
   if (run.fatal) return fail_('AI_KEY_ERROR', run.fatal);
   if (run.result) {
     aiRememberGood_(run.result.model);
@@ -1868,9 +2011,8 @@ function apiAiChat_(req, ctx) {
       if (tried.indexOf(retry[r]) < 0) todo.push(retry[r]);
     }
     if (todo.length) {
-      var run2 = aiRunModels_(key, todo, contents, opts);
+      var run2 = aiRunModels_(key, todo, messages, opts);
       aiRememberRetired_(run2.retired);
-      if (run2.noQuota) return fail_('AI_NO_QUOTA', run2.fatal);
       if (run2.fatal) return fail_('AI_KEY_ERROR', run2.fatal);
       if (run2.result) {
         aiRememberGood_(run2.result.model);
@@ -1878,12 +2020,16 @@ function apiAiChat_(req, ctx) {
         return ok_(run2.result, '적어둔 모델 대신 ' + run2.result.model + ' 로 답했습니다.');
       }
       run.errors = run.errors.concat(run2.errors);
+      run.allQuota = run.allQuota && run2.allQuota;
     }
   }
 
+  // 시도한 모델이 전부 "하루 한도" 였다면 그 안내를 그대로 보여줍니다.
+  if (run.allQuota) return fail_('AI_NO_QUOTA', AI_NO_QUOTA_MSG_);
+
   return fail_('AI_FAILED',
     '지금은 답을 받을 수 없습니다.\n\n' + aiSummarizeErrors_(run.errors) +
-    (fresh.length ? '\n\n이 키로 쓸 수 있는 모델: ' + fresh.join(', ') : ''));
+    (fresh.length ? '\n\n이 키로 쓸 수 있는 모델: ' + fresh.slice(0, 10).join(', ') : ''));
 }
 
 /**
@@ -1940,7 +2086,7 @@ function aiPutModelList_(list) {
   catch (e) { /* 무시 */ }
 }
 
-/* ---- "이제 못 쓰는 모델" 기억해 두기 (하루) ---- */
+/* ---- "이제 못 쓰는 모델" 기억해 두기 ---- */
 
 function aiRetiredModels_() {
   try {
@@ -1967,9 +2113,10 @@ function aiRememberGood_(model) {
 }
 
 /** 실패한 모델을 잠시 뒤로 미룹니다 */
-function aiCooldown_(model) {
-  try { CacheService.getScriptCache().put('aiCd_' + model, '1', AI_COOLDOWN_TTL_); }
-  catch (e) { /* 무시 */ }
+function aiCooldown_(model, seconds) {
+  try {
+    CacheService.getScriptCache().put('aiCd_' + model, '1', seconds || AI_COOLDOWN_TTL_);
+  } catch (e) { /* 무시 */ }
 }
 
 function aiIsCoolingDown_(model) {
@@ -2008,37 +2155,44 @@ function aiDropRetired_(models) {
 }
 
 /**
- * 모델 목록을 차례로 두드려 봅니다.
- * @returns {{result:Object|null, errors:Array, fatal:string, sawNotFound:boolean}}
+ * 모델 목록을 차례로 두드려 봅니다. (Groq = OpenAI 형식의 /chat/completions)
+ * @returns {{result:Object|null, errors:Array, fatal:string, allQuota:boolean, retired:Array}}
  */
-function aiRunModels_(key, models, contents, opts) {
+function aiRunModels_(key, models, messages, opts) {
   var base = aiBase_();
   var errors = [];
-  var sawNotFound = false;
   var retired = [];
+  var attempted = 0;
+  var quotaHits = 0;
 
   for (var mi = 0; mi < models.length; mi++) {
     var model = models[mi];
+    attempted++;
 
-    // 검색 도구를 켜고 먼저 시도 → 도구를 지원하지 않으면 끄고 한 번 더
-    var tries = opts.useSearch ? [true, false] : [false];
+    // 검색 도구를 켜고 먼저 시도 → 지원하지 않으면 끄고 한 번 더
+    var wantSearch = opts.useSearch && aiSupportsSearch_(model);
+    var tries = wantSearch ? [true, false] : [false];
+    var waited = false;
 
     for (var t = 0; t < tries.length; t++) {
       var payload = {
-        contents: contents,
-        generationConfig: { temperature: 0.7, maxOutputTokens: opts.maxTokens }
+        model: model,
+        messages: messages,
+        temperature: 0.7,
+        // gpt-oss 같은 생각하는 모델에서는 max_tokens 가 아니라 이 이름을 씁니다.
+        max_completion_tokens: opts.maxTokens,
+        // 생각을 짧게 시켜 답이 빨리 나오고 토큰도 덜 씁니다.
+        reasoning_effort: 'low',
+        stream: false
       };
-      if (opts.system) payload.systemInstruction = { parts: [{ text: opts.system }] };
-      if (tries[t]) payload.tools = [{ google_search: {} }];
-
-      var url = base + '/models/' + encodeURIComponent(model) +
-                ':generateContent?key=' + encodeURIComponent(key);
+      if (tries[t]) payload.tools = [{ type: 'browser_search' }];
 
       var res, code, body;
       try {
-        res = UrlFetchApp.fetch(url, {
+        res = UrlFetchApp.fetch(base + '/chat/completions', {
           method: 'post',
           contentType: 'application/json',
+          headers: { Authorization: 'Bearer ' + key },
           payload: JSON.stringify(payload),
           muteHttpExceptions: true
         });
@@ -2050,23 +2204,30 @@ function aiRunModels_(key, models, contents, opts) {
       }
 
       if (code < 200 || code >= 300) {
-        // 검색 도구를 지원하지 않는 모델이면 도구 없이 다시 시도
-        if (tries[t] && /tool|google_search|function|Search Grounding/i.test(body)) continue;
-        if (code === 404 || /not found|NOT_FOUND|is not supported/i.test(body)) sawNotFound = true;
-
         var info = aiClassifyError_(code, body);
+
+        // 검색 도구를 지원하지 않는 모델이면 도구 없이 다시 시도
+        if (tries[t] && (info.noTool || /tool|browser_search/i.test(body))) continue;
+
         if (info.fatal) {
           return {
             result: null, errors: errors, fatal: info.message,
-            noQuota: !!info.noQuota, sawNotFound: sawNotFound, retired: retired
+            allQuota: false, retired: retired
           };
         }
+        if (info.quota) {
+          quotaHits++;
+          // 하루 한도는 오래 가므로 한 시간 뒤로 미뤄 둡니다.
+          aiCooldown_(model, 3600);
+          errors.push(model + ': ' + info.message);
+          break;
+        }
         if (info.retired) retired.push(model);
-        else aiCooldown_(model);   // 잠시 뒤로 미룹니다
-        if (info.retryable && info.retryAfter && info.retryAfter <= 20 && !opts._waited) {
+        else aiCooldown_(model);
+        if (info.retryable && info.retryAfter && info.retryAfter <= 15 && !waited) {
           // 잠깐 기다리면 되는 경우에는 한 번만 쉬었다가 같은 모델로 다시 해봅니다.
-          opts._waited = true;
-          Utilities.sleep(Math.min(info.retryAfter, 20) * 1000 + 500);
+          waited = true;
+          Utilities.sleep(info.retryAfter * 1000 + 400);
           t--;
           continue;
         }
@@ -2080,16 +2241,13 @@ function aiRunModels_(key, models, contents, opts) {
         break;
       }
 
-      var cand = json.candidates && json.candidates[0];
-      var parts = (cand && cand.content && cand.content.parts) || [];
-      var out = '';
-      for (var p = 0; p < parts.length; p++) out += (parts[p].text || '');
-      out = out.replace(/^\s+|\s+$/g, '');
+      var choice = json.choices && json.choices[0];
+      var out = aiExtractText_(choice);
 
       if (!out) {
-        var why = (cand && cand.finishReason) || '';
+        var why = (choice && choice.finish_reason) || '';
         // 생각하는 데 글자 수를 다 써버린 경우에는 넉넉히 늘려 한 번 더 시도합니다.
-        if (why === 'MAX_TOKENS' && !opts._retriedTokens) {
+        if (why === 'length' && !opts._retriedTokens) {
           opts._retriedTokens = true;
           opts.maxTokens = Math.min(opts.maxTokens * 3, 8192);
           t--;                       // 같은 모델로 다시
@@ -2105,52 +2263,70 @@ function aiRunModels_(key, models, contents, opts) {
           model: model,
           index: mi,
           total: models.length,
-          grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
+          grounded: !!tries[t]
         },
-        errors: errors, fatal: '', sawNotFound: sawNotFound, retired: retired
+        errors: errors, fatal: '', allQuota: false, retired: retired
       };
     }
   }
 
-  return { result: null, errors: errors, fatal: '', sawNotFound: sawNotFound, retired: retired };
+  return {
+    result: null, errors: errors, fatal: '',
+    allQuota: attempted > 0 && quotaHits === attempted,
+    retired: retired
+  };
+}
+
+/**
+ * 응답에서 사람이 읽을 답만 꺼냅니다.
+ * (생각하는 모델은 reasoning 칸을 따로 보내는데, 그건 보여주지 않습니다)
+ */
+function aiExtractText_(choice) {
+  var msg = choice && choice.message;
+  if (!msg) return '';
+  var c = msg.content;
+  var out = '';
+  if (typeof c === 'string') {
+    out = c;
+  } else if (c && c.length) {
+    // 배열로 오는 경우 (텍스트 조각들)
+    for (var i = 0; i < c.length; i++) {
+      if (typeof c[i] === 'string') out += c[i];
+      else if (c[i] && c[i].text) out += c[i].text;
+    }
+  }
+  return String(out).replace(/^\s+|\s+$/g, '');
 }
 
 /** 실제 쓸 수 있는 모델 이름만 받아옵니다 (실패하면 빈 배열) */
 function aiFetchModelList_(key) {
   try {
-    var res = UrlFetchApp.fetch(
-      aiBase_() + '/models?pageSize=200&key=' + encodeURIComponent(key),
-      { method: 'get', muteHttpExceptions: true });
+    var res = UrlFetchApp.fetch(aiBase_() + '/models', {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + key },
+      muteHttpExceptions: true
+    });
     if (res.getResponseCode() !== 200) return [];
-    var json = JSON.parse(res.getContentText());
-    var arr = json.models || [];
-    var list = [];
-    for (var i = 0; i < arr.length; i++) {
-      var methods = arr[i].supportedGenerationMethods || arr[i].supported_generation_methods || [];
-      if (methods.indexOf('generateContent') < 0) continue;
-      var name = String(arr[i].name || '').replace(/^models\//, '');
-      if (name) list.push(name);
-    }
-    return list;
+    return aiParseModelList_(res.getContentText());
   } catch (e) { return []; }
 }
 
-/**
- * 선호하는 모델 (위에서부터 우선순위).
- * "-latest" 는 구글이 모델 이름을 바꿔도 그대로 남아서 가장 안전합니다.
- */
-var AI_MODEL_PRIORITY_ = [
-  /^gemini-flash-lite-latest$/,
-  /^gemini-flash-latest$/,
-  /^gemini-3\.\d+.*-flash-lite$/,
-  /^gemini-3\.\d+.*-flash$/,
-  /^gemini-2\.5-flash-lite$/,
-  /^gemini-2\.5-flash$/,
-  /^gemini-2\.0-flash-lite(-001)?$/,
-  /^gemini-2\.0-flash(-001)?$/,
-  /^gemini-.*-flash[^-]*$/,   // 그 밖의 flash 계열
-  /^gemini-.*-pro[^-]*$/      // pro 계열
-];
+/** Groq 의 /models 응답에서 대화용 모델 이름만 골라냅니다 */
+function aiParseModelList_(bodyText) {
+  var json;
+  try { json = JSON.parse(bodyText); } catch (e) { return []; }
+  var arr = json.data || json.models || [];
+  var list = [];
+  for (var i = 0; i < arr.length; i++) {
+    var id = String(arr[i].id || arr[i].name || '');
+    if (!id) continue;
+    // 음성 인식(whisper) · 음성 합성(tts) · 안전 필터(guard) 는 대화에 쓰지 않습니다.
+    if (/whisper|tts|guard|embed|prompt-?guard|distil/i.test(id)) continue;
+    if (arr[i].active === false) continue;
+    list.push(id);
+  }
+  return list;
+}
 
 /** 한 번의 질문에서 시도할 최대 모델 수 (헛 호출로 시간을 낭비하지 않도록) */
 var AI_MAX_ATTEMPTS_ = 3;
@@ -2160,46 +2336,42 @@ var AI_COOLDOWN_TTL_ = 600;
 
 /**
  * 받아온 목록에서 "우리가 쓰기 좋은" 모델을 골라 순서를 정합니다.
- * 원래 적어둔 이름과 비슷한 것(예: flash-lite)을 먼저, 실험/미리보기 판은 뒤로 보냅니다.
+ * (무료 한도가 넉넉하고 품질이 좋은 것을 앞으로)
  */
 function aiPickModels_(available, wanted) {
-  var wantLite = false;
-  for (var w = 0; w < wanted.length; w++) {
-    if (/lite/i.test(wanted[w])) { wantLite = true; break; }
-  }
-
   function score(name) {
     var s = 0;
-    if (/^gemini-/.test(name)) s += 100;
-    // "-latest" 는 구글이 모델 이름을 바꿔도 그대로라서 가장 안전합니다.
-    if (/-latest$/.test(name)) s += 60;
-    if (/flash/i.test(name)) s += 40;
-    if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
-    if (/pro/i.test(name)) s += 10;
-    // 버전이 높을수록 앞으로 (gemini-3.5-... > gemini-2.5-...)
-    var v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
-    if (v) s += (parseInt(v[1], 10) || 0) * 6 + (parseInt(v[2], 10) || 0);
-    // 실험판·미리보기·특수 목적은 뒤로
-    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma|live|native/i.test(name)) s -= 80;
-    if (/\d{3,}/.test(name)) s -= 15;   // 날짜가 붙은 고정 버전(-001, -20250219 등)
+    // gpt-oss 계열이 무료 한도(하루 토큰)가 가장 넉넉하고 품질도 좋습니다.
+    if (/gpt-oss/i.test(name)) s += 100;
+    if (/gpt-oss-120b/i.test(name)) s += 30;
+    if (/gpt-oss-20b/i.test(name)) s += 20;
+    if (/qwen/i.test(name)) s += 60;
+    if (/llama/i.test(name)) s += 40;
+    if (/kimi|moonshot|deepseek|mistral/i.test(name)) s += 30;
+    // 버전이 높을수록 앞으로
+    var v = name.match(/(\d+)(?:\.(\d+))?/);
+    if (v) s += (parseInt(v[1], 10) || 0);
+    // 실험판 · 미리보기 · 특수 목적은 뒤로
+    if (/preview|instruct-0|vision|audio|speech|reasoning-only/i.test(name)) s -= 25;
+    // 아주 작은 모델은 답 품질이 떨어지므로 뒤로
+    if (/-(1|3|4)b\b/i.test(name)) s -= 40;
     return s;
   }
 
   return available.slice()
-    .filter(function (n) { return /^gemini-/.test(n); })
     .sort(function (a, b) { return score(b) - score(a); })
     .slice(0, 5);
 }
 
 /**
  * 서버 키로 실제 쓸 수 있는 모델 목록을 알려줍니다.
- * (구글이 모델 이름을 바꿨을 때 앱에서 바로 확인할 수 있도록)
+ * (Groq 이 모델을 갈아치웠을 때 앱에서 바로 확인할 수 있도록)
  */
 function apiAiModels_(req, ctx) {
-  var key = prop_('GEMINI_API_KEY', '');
+  var key = aiKey_();
   if (!key) {
     return fail_('AI_NO_KEY',
-      '서버에 Gemini API 키가 없습니다. [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 추가해 주세요.');
+      '서버에 Groq API 키가 없습니다. [프로젝트 설정 > 스크립트 속성] 에 GROQ_API_KEY 를 추가해 주세요.');
   }
 
   var cache = CacheService.getScriptCache();
@@ -2208,10 +2380,13 @@ function apiAiModels_(req, ctx) {
     try { return ok_({ models: JSON.parse(cached), cached: true }, ''); } catch (e) { /* 무시 */ }
   }
 
-  var url = aiBase_() + '/models?pageSize=200&key=' + encodeURIComponent(key);
   var res, code, body;
   try {
-    res = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true });
+    res = UrlFetchApp.fetch(aiBase_() + '/models', {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + key },
+      muteHttpExceptions: true
+    });
     code = res.getResponseCode();
     body = res.getContentText();
   } catch (err) {
@@ -2223,19 +2398,8 @@ function apiAiModels_(req, ctx) {
     return fail_('AI_LIST_FAILED', info.message);
   }
 
-  var json;
-  try { json = JSON.parse(body); } catch (e3) {
-    return fail_('AI_LIST_FAILED', '모델 목록 응답을 해석하지 못했습니다.');
-  }
-
-  var list = [];
-  var arr = json.models || [];
-  for (var i = 0; i < arr.length; i++) {
-    var methods = arr[i].supportedGenerationMethods || arr[i].supported_generation_methods || [];
-    if (methods.indexOf('generateContent') < 0) continue;
-    var name = String(arr[i].name || '').replace(/^models\//, '');
-    if (name) list.push(name);
-  }
+  var list = aiParseModelList_(body);
+  if (!list.length) return fail_('AI_LIST_FAILED', '쓸 수 있는 모델을 찾지 못했습니다.');
 
   try { cache.put('aiModelList', JSON.stringify(list), 1800); } catch (e4) { /* 무시 */ }
   return ok_({ models: list, cached: false }, '');
@@ -2243,11 +2407,14 @@ function apiAiModels_(req, ctx) {
 
 /** 앱이 "서버 키가 준비됐는지 / 서버가 정한 모델 순서" 를 물어볼 때 */
 function apiAiStatus_(req, ctx) {
+  var ready = aiServerReady_();
   return ok_({
-    ready: aiServerReady_(),
-    models: aiServerReady_() ? aiServerModels_() : []
+    ready: ready,
+    provider: 'groq',
+    models: ready ? aiServerModels_() : []
   }, '');
 }
+
 
 /* ============================================================
  * 11. 설치 / 초기화 함수 (사용자가 직접 실행)
@@ -2271,7 +2438,7 @@ function setupBestOneProject() {
 
   // SPREADSHEET_ID 가 비어 있으면 현재 스프레드시트 ID 로 자동 저장
   if (!prop_('SPREADSHEET_ID', '')) {
-    props_().setProperty('SPREADSHEET_ID', ss.getId());
+    props_().setProperty('SPREADSHEET_ID', ss.getId()); forgetProps_();
     log.push('SPREADSHEET_ID 를 자동으로 설정했습니다: ' + ss.getId());
   }
 
@@ -2295,7 +2462,7 @@ function setupBestOneProject() {
   var tripId = prop_('TRIP_ID', '');
   if (!tripId) {
     tripId = 'trip-jp-' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd');
-    props_().setProperty('TRIP_ID', tripId);
+    props_().setProperty('TRIP_ID', tripId); forgetProps_();
     log.push('TRIP_ID 를 자동 생성했습니다: ' + tripId);
   }
   var defaults = {
@@ -2354,25 +2521,25 @@ function setupBestOneProject() {
   }
   if (!prop_('PASSWORD_SALT', '')) {
     var salt = Utilities.getUuid().replace(/-/g, '').substring(0, 16);
-    props_().setProperty('PASSWORD_SALT', salt);
+    props_().setProperty('PASSWORD_SALT', salt); forgetProps_();
     log.push('[생성] PASSWORD_SALT 를 자동 생성했습니다: ' + salt);
   }
   if (!prop_('SESSION_DAYS', '')) {
-    props_().setProperty('SESSION_DAYS', '180');
+    props_().setProperty('SESSION_DAYS', '180'); forgetProps_();
     log.push('[설정] SESSION_DAYS = 180');
   }
   if (!prop_('TRIP_CODE', '')) {
-    props_().setProperty('TRIP_CODE', 'bestone');
+    props_().setProperty('TRIP_CODE', 'bestone'); forgetProps_();
     log.push('[설정] TRIP_CODE = bestone (원하는 값으로 바꾸세요)');
   }
 
   // AI 도우미 (선택 사항 - 없어도 나머지 기능은 모두 동작합니다)
-  if (!prop_('GEMINI_API_KEY', '')) {
-    log.push('[선택] GEMINI_API_KEY 가 없습니다. AI 도우미를 쓰려면 ' +
-             'https://aistudio.google.com/apikey 에서 키를 만들어 ' +
-             '[프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 로 추가해 주세요.');
+  if (!prop_('GROQ_API_KEY', '')) {
+    log.push('[선택] GROQ_API_KEY 가 없습니다. AI 도우미를 쓰려면 ' +
+             'https://console.groq.com/keys 에서 키를 만들어 ' +
+             '[프로젝트 설정 > 스크립트 속성] 에 GROQ_API_KEY 로 추가해 주세요.');
   } else {
-    log.push('[OK] GEMINI_API_KEY 가 설정되어 있습니다. (모델 순서: ' + aiServerModels_().join(' → ') + ')');
+    log.push('[OK] GROQ_API_KEY 가 설정되어 있습니다. (모델 순서: ' + aiServerModels_().join(' → ') + ')');
   }
 
   // 날짜/시각 값이 Google Sheets 에 의해 자동으로 잘못 바뀌어 있으면 복구합니다.
@@ -2397,7 +2564,7 @@ function generatePasswordHash() {
   var salt = prop_('PASSWORD_SALT', '');
   if (!salt) {
     salt = Utilities.getUuid().replace(/-/g, '').substring(0, 16);
-    props_().setProperty('PASSWORD_SALT', salt);
+    props_().setProperty('PASSWORD_SALT', salt); forgetProps_();
   }
   var hash = hashPassword_(PASSWORD, salt);
   Logger.log('==============================================');
@@ -2415,12 +2582,12 @@ function checkSetup() {
   var lines = [];
   var p = props_().getProperties();
   ['SPREADSHEET_ID', 'DRIVE_FOLDER_ID', 'TRIP_CODE', 'PASSWORD_SALT', 'PASSWORD_HASH',
-   'SESSION_DAYS', 'TRIP_ID', 'GEMINI_API_KEY', 'GEMINI_MODELS']
+   'SESSION_DAYS', 'TRIP_ID', 'GROQ_API_KEY', 'GROQ_MODELS']
     .forEach(function (k) {
       var v = p[k];
       // 비밀 값은 앞 몇 글자만 보여줍니다 (로그에 그대로 남지 않도록)
-      if ((k === 'PASSWORD_HASH' || k === 'GEMINI_API_KEY') && v) v = v.substring(0, 8) + '...(생략)';
-      var optional = (k === 'GEMINI_API_KEY' || k === 'GEMINI_MODELS');
+      if ((k === 'PASSWORD_HASH' || k === 'GROQ_API_KEY') && v) v = v.substring(0, 8) + '...(생략)';
+      var optional = (k === 'GROQ_API_KEY' || k === 'GROQ_MODELS');
       lines.push((v ? '[OK] ' : (optional ? '[선택] ' : '[없음] ')) + k + ' = ' + (v || ''));
     });
 
@@ -2790,6 +2957,7 @@ function bulkAppend_(sheetName, objects) {
   var startRow = sh.getLastRow() + 1;
   protectRowDateTimeColumns_(sh, sheetName, headers, startRow, rows.length);
   sh.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
+  forgetSheet_(sheetName);
 }
 
 function addDays_(dateStr, n) {
@@ -2819,6 +2987,7 @@ function clearSampleData() {
     for (var i = values.length - 1; i >= 0; i--) {
       if (isTrue_(values[i][0])) { sh.deleteRow(i + 2); count++; }
     }
+    forgetSheet_(name);
   });
   Logger.log('샘플 데이터 ' + count + '행을 삭제했습니다.');
   return count;

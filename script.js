@@ -45,7 +45,9 @@ const S = {
   transit: { city: 'tokyo', mode: 'route', from: null, to: null, result: null, searched: false, line: 0 },
   lastSync: null,
   loading: false,
-  booted: false
+  booted: false,
+  /** 새 버전 안내를 이미 띄웠는지 (서비스 워커가 알려줍니다) */
+  updateNotified: false
 };
 
 /* =========================================================================
@@ -373,9 +375,18 @@ function toast(message, kind, ms) {
 
 function showLoading(text) {
   $('#loadingText').textContent = text || '불러오는 중…';
-  $('#loadingOverlay').classList.remove('hidden');
+  const el = $('#loadingOverlay');
+  el.classList.remove('hidden');
+  // 보이는 동안에는 화면 낭독기에도 읽히도록 (예전에는 항상 숨김 처리였습니다)
+  el.setAttribute('aria-hidden', 'false');
+  el.setAttribute('aria-busy', 'true');
 }
-function hideLoading() { $('#loadingOverlay').classList.add('hidden'); }
+function hideLoading() {
+  const el = $('#loadingOverlay');
+  el.classList.add('hidden');
+  el.setAttribute('aria-hidden', 'true');
+  el.setAttribute('aria-busy', 'false');
+}
 
 function confirmBox(title, text, okLabel) {
   return new Promise(resolve => {
@@ -404,10 +415,40 @@ function openViewer(url, isPdf) {
   // 한 장짜리도 여러 장 뷰어를 그대로 씁니다 (PDF 도 앱 안에서 열립니다)
   openGallery([url], isPdf ? '문서' : '사진', 0);
 }
+
+/* ---------- 전체 화면 창(사진 뷰어 · 큰 글씨) 열고 닫기 ----------
+ * 열려 있는 동안 뒤 화면이 같이 스크롤되지 않도록 잠그고,
+ * 닫을 때는 원래 누르던 버튼으로 초점을 돌려줍니다. (키보드 · 스크린리더용)
+ */
+const overlayReturn = { viewer: null, bigText: null };
+
+function openOverlay(id) {
+  overlayReturn[id] = document.activeElement;
+  $('#' + id).classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  const closeBtn = $('#' + id + 'Close');
+  if (closeBtn) closeBtn.focus();
+}
+
+function closeOverlay(id) {
+  const el = $('#' + id);
+  if (!el || el.classList.contains('hidden')) return;
+  el.classList.add('hidden');
+  // 다른 창이 아직 열려 있으면 잠금을 풀지 않습니다.
+  if (!sheetState.open &&
+      $('#viewer').classList.contains('hidden') &&
+      $('#bigText').classList.contains('hidden')) {
+    document.body.style.overflow = '';
+  }
+  const back = overlayReturn[id];
+  overlayReturn[id] = null;
+  if (back && back.focus && document.contains(back)) back.focus();
+}
+
 function openBigText(main, sub) {
   $('#bigTextMain').textContent = main || '';
   $('#bigTextSub').textContent = sub || '';
-  $('#bigText').classList.remove('hidden');
+  openOverlay('bigText');
 }
 
 async function copyText(value, label) {
@@ -452,6 +493,25 @@ function openExternal(url) {
 }
 
 /**
+ * 앱이 직접 받아온 파일(blob 주소)을 전체 화면으로 엽니다.
+ *
+ * window.open 은 사파리에서 blob 주소를 막는 일이 있어서,
+ * 링크를 만들어 눌러주는 방식으로 엽니다. (팝업 차단에도 강합니다)
+ */
+function openBlobFullscreen(blobUrl, name) {
+  if (!blobUrl) return;
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  // 사파리가 새 탭 대신 다운로드로 처리해도 파일 이름이 남도록
+  if (name) a.setAttribute('title', name);
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { if (a.parentNode) a.parentNode.removeChild(a); }, 0);
+}
+
+/**
  * 아이폰 · 아이패드인지 확인합니다.
  * (아이패드는 최근 기종에서 자신을 Mac 이라고 알려주므로 터치 여부도 함께 봅니다)
  */
@@ -488,9 +548,32 @@ function skeletonList(n) {
  * 4. 로그인 화면
  * ========================================================================= */
 
+/**
+ * 로그인 화면의 그림을 그때 내려받습니다.
+ * (이미 로그인한 사람은 이 그림을 받지 않아 시작이 빨라집니다)
+ */
+function loadLoginArt() {
+  const sky = $('#loginSky');
+  if (!sky || sky.dataset.loaded) return;
+  sky.dataset.loaded = '1';
+
+  const pic = h('picture', null, [
+    h('source', { srcset: sky.dataset.webp, type: 'image/webp' }),
+    h('img', {
+      class: 'login-art', src: sky.dataset.jpg, width: 1600, height: 900,
+      alt: '별이 빛나는 사막 행성에서 지도를 든 작은 여행자가 여행 모자를 쓴 코끼리와 함께 이정표 앞에 서 있는 모습',
+      decoding: 'async'
+    })
+  ]);
+  sky.appendChild(pic);
+}
+
 function showLogin() {
+  // index.html 이 미리 걸어둔 임시 감춤을 해제합니다.
+  document.documentElement.classList.remove('boot-signed-in');
   $('#app').classList.add('hidden');
   $('#loginScreen').classList.remove('hidden');
+  loadLoginArt();
   closeAiChat();
   const fab = $('#aiFab');
   if (fab && fab.parentNode) fab.parentNode.removeChild(fab);
@@ -503,6 +586,7 @@ function showLogin() {
 function showApp() {
   $('#loginScreen').classList.add('hidden');
   $('#app').classList.remove('hidden');
+  document.documentElement.classList.remove('boot-signed-in');
   mountAiButton();
 }
 
@@ -678,8 +762,13 @@ function applyBootstrap(data) {
 
 async function bootstrap(showSpinner) {
   if (showSpinner) showLoading('여행 정보를 불러오는 중…');
-  S.loading = true;
-  renderCurrentTab();
+  // 이미 보여줄 자료가 있으면 화면을 비우지 않습니다.
+  // (저장된 자료를 먼저 띄운 뒤 뒤에서 최신 자료를 받아오는 경우)
+  if (!S.booted) {
+    S.loading = true;
+    renderCurrentTab();
+  }
+  const wasBooted = S.booted;
   try {
     const data = await api('getBootstrapData', {}, { retry: 1 });
     applyBootstrap(data);
@@ -688,16 +777,22 @@ async function bootstrap(showSpinner) {
     lsSet(CACHE_KEY, { data: data, at: S.lastSync });
     updateHeader();
     ensureDefaultDates();
-    renderCurrentTab();
+    // 이미 보고 있던 화면이면 읽던 위치를 지켜줍니다.
+    if (wasBooted) renderKeepingScroll(); else renderCurrentTab();
     updateSyncBar('마지막 동기화 ' + fmtSyncTime(S.lastSync));
   } catch (err) {
+    // 세션이 만료된 경우에는 api() 가 이미 로그인 화면으로 보냅니다.
+    if (err && err.code === 'INVALID_SESSION') { updateSyncBar('로그인이 만료되었습니다'); return; }
+
     const cache = lsGet(CACHE_KEY, null);
     if (cache && cache.data) {
-      applyBootstrap(cache.data);
-      S.booted = true;
-      updateHeader();
-      ensureDefaultDates();
-      renderCurrentTab();
+      if (!wasBooted) {
+        applyBootstrap(cache.data);
+        S.booted = true;
+        updateHeader();
+        ensureDefaultDates();
+        renderCurrentTab();
+      }
       updateSyncBar('오프라인 - 저장된 자료 (' + fmtSyncTime(cache.at) + ')');
       toast('서버에 연결하지 못해 저장된 자료를 보여줍니다.', 'error', 3200);
     } else {
@@ -718,7 +813,8 @@ async function silentRefresh() {
     S.lastSync = new Date().toISOString();
     lsSet(CACHE_KEY, { data: data, at: S.lastSync });
     updateSyncBar('마지막 동기화 ' + fmtSyncTime(S.lastSync));
-    renderCurrentTab();
+    // 읽던 위치를 잃지 않게 다시 그립니다.
+    renderKeepingScroll();
   } catch (e) { /* 조용히 실패 */ }
 }
 
@@ -1025,7 +1121,10 @@ async function closeSheet(force) {
   sheetState.open = false;
   sheetState.dirty = false;
   activeAttachField = null;
-  document.body.style.overflow = '';
+  // 사진 뷰어 등이 아직 열려 있으면 스크롤 잠금을 유지합니다.
+  if ($('#viewer').classList.contains('hidden') && $('#bigText').classList.contains('hidden')) {
+    document.body.style.overflow = '';
+  }
   document.body.classList.remove('sheet-open');
 }
 
@@ -1190,50 +1289,105 @@ function driveFileId(url) {
 }
 
 /**
- * 같은 파일을 여러 번 열어도 다시 받지 않도록 blob 주소를 기억해 둡니다.
- * (앱을 닫으면 자동으로 사라집니다)
+ * 같은 파일을 여러 번 열어도 다시 받지 않도록 진행 중인 작업과 blob 주소를
+ * 함께 기억해 둡니다. (앱을 닫으면 자동으로 사라집니다)
+ * 값은 항상 Promise 라서, 두 번 연속 눌러도 두 번 내려받지 않습니다.
  */
 const docBlobCache = {};
 
+/** base64 글자를 바이트 배열로 바꿉니다 */
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf;
+}
+
+/** 동시에 몇 조각까지 함께 받을지 (Apps Script 왕복 비용이 크므로 병렬로 받습니다) */
+const DOC_PARALLEL = 3;
+
 /**
- * PDF 를 앱 안에서 보기 위해 파일 내용을 직접 받아옵니다.
+ * PDF · 영상을 앱 안에서 보기 위해 파일 내용을 직접 받아옵니다.
  *
  * ★ 왜 이렇게 하나요?
  *   Drive 의 미리보기 주소를 iframe 에 넣으면, Drive 가 자기 로그인 화면을
  *   다시 iframe 으로 열려다가 Drive 스스로의 보안 규칙(frame-ancestors)에 막힙니다.
  *   그래서 문서가 검게 나오거나 잘려 보입니다.
  *   파일 내용만 받아와서 브라우저에 내장된 PDF 뷰어로 열면 이런 문제가 없습니다.
+ *
+ * ★ 속도
+ *   첫 조각을 받으면 전체 크기를 알 수 있으므로, 나머지 조각은 한 줄로 기다리지
+ *   않고 여러 개를 동시에 받습니다. (Apps Script 는 왕복 한 번이 느립니다)
  */
-async function loadDocBlobUrl(url, onProgress) {
+function loadDocBlobUrl(url, onProgress) {
   const fileId = driveFileId(url);
   const key = fileId || url;
-  if (docBlobCache[key]) return docBlobCache[key];
-
-  // 큰 파일(영상 등)은 여러 조각으로 나눠 받습니다.
-  const target = fileId ? { fileId } : { url };
-  const parts = [];
-  let offset = 0, mimeType = '', guard = 0;
-
-  for (;;) {
-    const data = await api('getFileData', Object.assign({ offset }, target),
-      { timeout: 90000, retry: 0 });
-    if (!data || !data.base64) throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
-
-    mimeType = data.mimeType || mimeType;
-    const bin = atob(data.base64);
-    const buf = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-    parts.push(buf);
-
-    offset += (data.length || bin.length);
-    if (onProgress && data.size) onProgress(Math.min(offset / data.size, 1));
-    if (data.done || !data.size || offset >= data.size) break;
-    if (++guard > 60) throw apiError('TOO_LARGE', '파일이 너무 커서 앱 안에서 열 수 없습니다.');
+  if (docBlobCache[key]) {
+    // 이미 다 받아둔 파일이면 진행률을 100% 로 알려주고 바로 돌려줍니다.
+    if (onProgress) docBlobCache[key].then(() => onProgress(1)).catch(() => {});
+    return docBlobCache[key];
   }
 
-  const blobUrl = URL.createObjectURL(new Blob(parts, { type: mimeType || 'application/pdf' }));
-  docBlobCache[key] = blobUrl;
-  return blobUrl;
+  const job = fetchDocBlob(fileId ? { fileId } : { url }, onProgress)
+    .catch(err => { delete docBlobCache[key]; throw err; });
+  docBlobCache[key] = job;
+  return job;
+}
+
+async function fetchDocBlob(target, onProgress) {
+  const first = await api('getFileData', Object.assign({ offset: 0 }, target),
+    { timeout: 90000, retry: 1 });
+  if (!first || typeof first.base64 !== 'string') {
+    throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
+  }
+
+  const mimeType = first.mimeType || 'application/pdf';
+  const total = Number(first.size) || 0;
+  const chunk = Number(first.chunkMax) || Number(first.length) || 3 * 1024 * 1024;
+
+  const parts = [b64ToBytes(first.base64)];
+  let got = parts[0].length;
+  const report = () => { if (onProgress) onProgress(total ? Math.min(got / total, 1) : 1); };
+  report();
+
+  if (first.done || !total || got >= total) {
+    return URL.createObjectURL(new Blob(parts, { type: mimeType }));
+  }
+
+  // ---- 남은 조각들의 위치를 미리 계산해 둡니다 ----
+  const offsets = [];
+  for (let o = got; o < total; o += chunk) offsets.push(o);
+  if (offsets.length > 60) throw apiError('TOO_LARGE', '파일이 너무 커서 앱 안에서 열 수 없습니다.');
+
+  const slots = new Array(offsets.length);
+  let next = 0;
+
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= offsets.length) return;
+      const data = await api('getFileData',
+        Object.assign({ offset: offsets[i], length: chunk }, target),
+        { timeout: 90000, retry: 1 });
+      if (!data || typeof data.base64 !== 'string') {
+        throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
+      }
+      slots[i] = b64ToBytes(data.base64);
+      got += slots[i].length;
+      report();
+    }
+  }
+
+  const workers = [];
+  for (let w = 0; w < Math.min(DOC_PARALLEL, offsets.length); w++) workers.push(worker());
+  await Promise.all(workers);
+
+  // 조각을 받은 순서가 아니라 파일 안에서의 순서대로 이어 붙입니다.
+  for (let i = 0; i < slots.length; i++) {
+    if (!slots[i]) throw apiError('NO_DATA', '파일 일부를 받지 못했습니다.');
+    parts.push(slots[i]);
+  }
+  return URL.createObjectURL(new Blob(parts, { type: mimeType }));
 }
 
 /** 클립보드·드래그로 들어온 항목에서 이미지/PDF 파일만 추려냅니다 */
@@ -2093,14 +2247,19 @@ function openGallery(urls, label, startIndex, opts) {
       // PDF 는 새 탭으로 나가지 않고 앱 안에서 바로 봅니다.
       // Drive 화면을 빌려 쓰지 않고 파일 내용을 받아와 브라우저 내장 뷰어로 엽니다.
       const frameWrap = h('div', { class: 'viewer-doc' },
-        h('div', { class: 'viewer-doc-msg', text: '문서를 여는 중…' }));
+        h('div', { class: 'viewer-doc-msg', text: '문서를 여는 중… 0%' }));
       inner.appendChild(frameWrap);
       inner.appendChild(h('div', { class: 'viewer-tools' },
         iconBtn('open_in_new', '새 탭에서 열기', 'btn btn-sm btn-ghost',
           e => { if (e) e.stopPropagation(); openExternal(url); })));
 
       const myIdx = idx;
-      loadDocBlobUrl(url).then(blobUrl => {
+      const msg = $('.viewer-doc-msg', frameWrap);
+      loadDocBlobUrl(url, pr => {
+        if (myIdx === idx && msg && msg.isConnected) {
+          msg.textContent = '문서를 여는 중… ' + Math.round(pr * 100) + '%';
+        }
+      }).then(blobUrl => {
         if (myIdx !== idx) return;          // 그 사이에 다른 장으로 넘어갔으면 무시
         clear(frameWrap);
         frameWrap.appendChild(h('iframe', {
@@ -2111,7 +2270,7 @@ function openGallery(urls, label, startIndex, opts) {
         if (tools) {
           tools.insertBefore(
             iconBtn('open_in_full', '전체 화면으로 보기', 'btn btn-sm btn-ghost',
-              e => { if (e) e.stopPropagation(); openExternal(blobUrl); }),
+              e => { if (e) e.stopPropagation(); openBlobFullscreen(blobUrl, label); }),
             tools.firstChild);
         }
         // 아이폰 · 아이패드 사파리는 PDF 를 작은 창 안에 못 그리는 경우가 많습니다.
@@ -2143,7 +2302,7 @@ function openGallery(urls, label, startIndex, opts) {
     }
   }
   draw();
-  $('#viewer').classList.remove('hidden');
+  openOverlay('viewer');
 }
 
 /* =========================================================================
@@ -3124,6 +3283,8 @@ function searchBox(placeholder, value, onInput) {
 function renderLocal() {
   const view = $('#view-local');
   if (S.loading && !S.booted) { mount(view, skeletonList(3)); return; }
+  // 현지 탭에 들어오면 노선 자료를 미리 받아둡니다. ([노선] 을 눌렀을 때 바로 뜨도록)
+  ensureTransitData();
   const nodes = [];
 
   const tabs = [
@@ -3641,10 +3802,48 @@ function lineDiagram(line) {
   return wrap;
 }
 
+/* ---------- 노선 자료 (약 270KB) 는 필요할 때만 불러옵니다 ----------
+ * 앱을 켤 때마다 받으면 시작이 느려지므로, [현지 > 노선] 을 처음 열 때
+ * 한 번만 내려받습니다. 이후에는 브라우저가 기억하고 있어 즉시 열립니다.
+ */
+const transitLoad = { state: 'idle', error: '' };
+
+function ensureTransitData() {
+  if (window.TRANSIT_DATA) { transitLoad.state = 'ready'; return; }
+  if (transitLoad.state === 'loading' || transitLoad.state === 'failed') return;
+  transitLoad.state = 'loading';
+
+  const base = location.pathname.replace(/[^/]*$/, '');
+  const s = document.createElement('script');
+  s.src = base + 'data/transit.js';
+  s.async = true;
+  s.onload = () => {
+    transitLoad.state = window.TRANSIT_DATA ? 'ready' : 'failed';
+    if (S.tab === 'local' && S.localTab === 'transit') renderLocal();
+  };
+  s.onerror = () => {
+    transitLoad.state = 'failed';
+    transitLoad.error = 'data/transit.js 파일을 불러오지 못했습니다.';
+    if (S.tab === 'local' && S.localTab === 'transit') renderLocal();
+  };
+  document.head.appendChild(s);
+}
+
 function renderTransit() {
   const nodes = [];
   if (!window.TRANSIT_DATA) {
-    return [emptyBox('노선 자료를 불러오지 못했습니다', 'data/transit.js 파일이 올라가 있는지 확인해 주세요.', 'wrong_location')];
+    ensureTransitData();
+    if (transitLoad.state === 'failed') {
+      return [emptyBox('노선 자료를 불러오지 못했습니다',
+        (transitLoad.error || 'data/transit.js 파일이 올라가 있는지 확인해 주세요.') +
+        '\n인터넷 연결을 확인한 뒤 다시 열어주세요.', 'wrong_location')];
+    }
+    return [h('div', { class: 'skeleton' }, [
+      h('div', { class: 'sk-line w70' }),
+      h('div', { class: 'sk-line w90' }),
+      h('div', { class: 'sk-line w40' }),
+      h('p', { class: 'faint tiny mt8', text: '노선 자료를 불러오는 중…' })
+    ])];
   }
   const cityKey = S.transit.city;
 
@@ -4551,6 +4750,22 @@ function renderCurrentTab() {
   else if (S.tab === 'record') renderRecord();
 }
 
+/**
+ * 화면을 다시 그리되 보고 있던 위치를 그대로 지켜줍니다.
+ *
+ * 오늘 화면은 1분마다, 그리고 앱으로 돌아올 때마다 자동으로 다시 그려집니다.
+ * 예전에는 그때마다 화면이 맨 위로 튀어 올라가서, 아래쪽 일정을 읽고 있으면
+ * 계속 위로 끌려가는 문제가 있었습니다.
+ */
+function renderKeepingScroll() {
+  const y = window.scrollY || window.pageYOffset || 0;
+  renderCurrentTab();
+  // 다시 그린 뒤 높이가 잡히고 나서 위치를 되돌립니다.
+  requestAnimationFrame(() => {
+    if (Math.abs((window.scrollY || 0) - y) > 1) window.scrollTo(0, y);
+  });
+}
+
 /** 모바일 하단 탭바 + PC 사이드바를 같은 정의로 만듭니다 */
 function buildNav() {
   const bar = $('#tabbar');
@@ -4570,7 +4785,15 @@ function buildNav() {
   });
 }
 
+/** 탭마다 보고 있던 위치를 기억해 둡니다 (돌아왔을 때 그 자리에서 이어보도록) */
+const tabScroll = {};
+
 function switchTab(tab) {
+  const prev = S.tab;
+  if (prev) tabScroll[prev] = window.scrollY || window.pageYOffset || 0;
+  // 같은 탭을 다시 누르면 "맨 위로" 로 동작합니다 (흔한 앱 관례)
+  const same = prev === tab;
+
   S.tab = tab;
   TABS.forEach(t => { $('#view-' + t.key).classList.toggle('hidden', t.key !== tab); });
   $$('.tab-btn, .nav-btn').forEach(b => {
@@ -4580,10 +4803,14 @@ function switchTab(tab) {
   });
   const cur = TABS.filter(t => t.key === tab)[0];
   if (cur) $('#headerPage').textContent = cur.label;
-  window.scrollTo(0, 0);
+
+  renderCurrentTab();
+
+  const back = same ? 0 : (tabScroll[tab] || 0);
   const main = $('#appMain');
   if (main) main.scrollTop = 0;
-  renderCurrentTab();
+  window.scrollTo(0, back);
+  if (back) requestAnimationFrame(() => window.scrollTo(0, back));
 }
 
 function openMenu() {
@@ -4637,7 +4864,7 @@ function toggleTheme() {
 }
 
 /* =========================================================================
- * 16. AI 도우미 (Google Gemini)
+ * 16. AI 도우미 (Groq)
  * -------------------------------------------------------------------------
  * · 화면 어디서나 오른쪽 아래 ✨ 버튼으로 열 수 있습니다.
  * · 앱에 저장된 여행 정보(일정·항공·숙소·예약·기록 등)를 함께 보내
@@ -4648,11 +4875,11 @@ function toggleTheme() {
  *
  * ★ API 키를 두는 곳 (중요)
  *   기본은 [서버 보관] 입니다.
- *     Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 넣으면
+ *     Apps Script 의 [프로젝트 설정 > 스크립트 속성] 에 GROQ_API_KEY 를 넣으면
  *     이 앱은 Apps Script 를 거쳐 AI 를 부릅니다. 키는 브라우저로 절대 내려오지
  *     않으므로, 앱 주소를 아는 사람이 키를 훔쳐갈 수 없습니다.
  *   서버에 키가 없을 때만 [이 기기에만 저장] 방식으로 넘어갑니다.
- *     이때는 브라우저(localStorage)에 넣은 키로 직접 Gemini 를 부릅니다.
+ *     이때는 브라우저(localStorage)에 넣은 키로 직접 Groq 을 부릅니다.
  *   어느 경우든 config.js 나 GitHub 저장소에는 키를 적지 않습니다.
  * ========================================================================= */
 
@@ -4822,7 +5049,9 @@ function aiTripContext() {
   }
 
   let text = lines.join('\n');
-  if (text.length > 6000) text = text.slice(0, 6000) + '\n…(생략)';
+  // Groq 무료 등급은 "분당 토큰" 한도가 넉넉하지 않아, 함께 보내는 여행 자료를
+  // 조금 줄였습니다. (너무 길면 한도에 걸려 답이 아예 오지 않습니다)
+  if (text.length > 4500) text = text.slice(0, 4500) + '\n…(생략)';
   return text;
 }
 
@@ -4847,67 +5076,63 @@ function aiSystemPrompt() {
   ].join('\n');
 }
 
-/* ---------- Gemini 호출 ---------- */
+/* ---------- Groq 호출 ---------- */
 
 /**
- * Gemini 오류 응답을 해석합니다.
+ * Groq 오류 응답을 해석합니다.
  * @returns {{fatal:boolean, message:string}}
  *   fatal 이면 다음 모델을 시도해도 소용없으므로 즉시 멈춥니다.
- *   (예: API 키가 잘못된 경우 - 이때도 HTTP 400 이 오기 때문에 구분이 필요합니다)
+ *   (예: API 키가 잘못된 경우)
  */
 function aiParseError(status, bodyText) {
-  let reason = '', message = '', gstatus = '';
+  let message = '', code = '';
   try {
     const e = (JSON.parse(bodyText) || {}).error || {};
     message = e.message || '';
-    gstatus = e.status || '';
-    (e.details || []).forEach(d => { if (d.reason) reason = d.reason; });
+    code = e.code || e.type || '';
   } catch (err) { message = String(bodyText || '').slice(0, 200); }
 
-  if (reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
-    return { fatal: true, message: 'API 키가 올바르지 않습니다. [설정] 에서 키를 다시 확인해 주세요.' };
+  if (status === 401 || /invalid_api_key|Invalid API Key/i.test(bodyText)) {
+    return { fatal: true, message: 'API 키가 올바르지 않습니다. [설정] 에서 키를 다시 확인해 주세요. (gsk_ 로 시작합니다)' };
   }
-  if (status === 403 || gstatus === 'PERMISSION_DENIED') {
+  if (status === 403) {
     return {
       fatal: true,
-      message: 'API 키에 권한이 없습니다.\n' +
-        '· AI Studio 에서 키가 활성 상태인지\n' +
-        '· 키에 걸어둔 웹사이트 제한(HTTP 리퍼러)에 이 앱 주소가 들어 있는지 확인해 주세요.'
+      message: 'API 키가 거부되었습니다.\nconsole.groq.com 에서 키가 살아 있는지 확인해 주세요.'
     };
   }
-  if (status === 401 || gstatus === 'UNAUTHENTICATED') {
-    return { fatal: true, message: '인증에 실패했습니다. API 키를 다시 넣어주세요.' };
-  }
-  if (status === 429 || gstatus === 'RESOURCE_EXHAUSTED') {
-    // "limit: 0" 은 이 키에 애초에 쓸 수 있는 양이 없다는 뜻입니다.
-    // 모델을 바꿔도 똑같이 막히므로 즉시 멈춥니다.
-    if (/limit:\s*0\b/.test(bodyText)) return { fatal: true, noQuota: true, message: AI_NO_QUOTA_MSG };
-    const wait = String(bodyText).match(/retry in ([0-9.]+)s/i);
+  if (status === 429 || /rate_limit/i.test(code)) {
+    const wait = String(bodyText).match(/try again in ([0-9.]+)(m|s)/i);
+    const sec = wait ? Math.ceil(parseFloat(wait[1]) * (wait[2].toLowerCase() === 'm' ? 60 : 1)) : 0;
+    const perDay = /per day|RPD|TPD/i.test(bodyText);
     return {
-      fatal: false, retryable: true,
-      retryAfter: wait ? Math.ceil(parseFloat(wait[1])) : 0,
-      message: '사용량이 잠시 가득 찼습니다' + (wait ? ' (약 ' + Math.ceil(parseFloat(wait[1])) + '초 뒤 가능)' : '')
+      fatal: false, retryable: !perDay, retryAfter: sec, quota: perDay,
+      message: perDay
+        ? '오늘 쓸 수 있는 양을 다 썼습니다 (하루 한도)'
+        : '사용량이 잠시 가득 찼습니다' + (sec ? ' (약 ' + sec + '초 뒤 가능)' : '')
     };
   }
-  if (/no longer available|is deprecated|has been (deprecated|retired)/i.test(message)) {
-    return { fatal: false, retired: true, message: '이제 새로 쓸 수 없는 모델입니다' };
+  if (status === 404 ||
+      /decommission|no longer supported|does not exist|model_not_found/i.test(message + ' ' + code)) {
+    return { fatal: false, retired: true, message: '이제 쓸 수 없는 모델입니다' };
   }
-  // 그 외(모델 없음 404, 일시 오류 500/503 등)는 다음 모델로 넘어갑니다.
+  if (/tool|browser_search/i.test(message)) {
+    return { fatal: false, noTool: true, message: message || '이 모델은 검색 도구를 지원하지 않습니다' };
+  }
+  // 그 외(일시 오류 500/503 등)는 다음 모델로 넘어갑니다.
   return { fatal: false, message: message || ('HTTP ' + status) };
 }
 
-/** 무료 사용량이 0으로 잡힌 키를 만났을 때 보여줄 안내 */
+/** 무료 한도를 다 썼을 때 보여줄 안내 */
 const AI_NO_QUOTA_MSG =
-  '이 API 키로는 AI 를 쓸 수 없습니다. (무료 사용량이 0으로 잡혀 있습니다)\n\n' +
-  '모델을 바꿔도 똑같이 막히므로, 키를 새로 만드는 것이 가장 빠릅니다.\n\n' +
-  '[해결 방법]\n' +
-  '1. aistudio.google.com/apikey 에 접속합니다.\n' +
-  '2. [Create API key] → 프로젝트를 고르는 화면이 나오면\n' +
-  '   반드시 "Create API key in new project"(새 프로젝트) 를 고릅니다.\n' +
-  '   ← 기존 Google Cloud 프로젝트에 만든 키는 무료 사용량이 0인 경우가 많습니다.\n' +
-  '3. 새 키를 넣고(스크립트 속성 GEMINI_API_KEY) 다시 배포합니다.\n\n' +
-  '그래도 0 이라면 그 프로젝트는 무료 사용량 대상이 아닙니다.\n' +
-  'Google Cloud 콘솔에서 결제를 연결하면 유료로 쓸 수 있습니다.';
+  '오늘 쓸 수 있는 AI 사용량을 모두 썼습니다.\n\n' +
+  'Groq 무료 등급은 모델마다 하루 한도가 따로 있습니다.\n' +
+  '내일이 되면 자동으로 다시 쓸 수 있습니다.\n\n' +
+  '[지금 바로 쓰고 싶다면]\n' +
+  '1. 위 ⚙ [설정] 에서 다른 모델을 맨 위로 올려 보세요.\n' +
+  '   (모델마다 한도가 따로라서 하나가 막혀도 다른 것은 됩니다)\n' +
+  '2. console.groq.com/settings/billing 에서 카드를 등록하면\n' +
+  '   한도가 약 10배로 늘어납니다. (최소 결제 금액은 없습니다)';
 
 /** 여러 모델이 같은 이유로 막혔을 때 한 줄로 묶습니다 */
 function aiSummarizeErrors(errors) {
@@ -5023,45 +5248,49 @@ async function aiGenerateDirect(userText, models, isRetry) {
   const key = aiApiKey();
   if (!key) throw new Error('NO_KEY');
 
-  // 최근 대화 (system 은 따로 보냄)
+  // 최근 대화 (Groq 은 OpenAI 형식이라 system 도 messages 안에 넣습니다)
   const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
-  const contents = turns.map(m => ({
-    role: m.role === 'user' ? 'user' : 'model',
-    parts: [{ text: m.text }]
-  }));
-  contents.push({ role: 'user', parts: [{ text: userText }] });
+  const messages = [{ role: 'system', content: aiSystemPrompt() }];
+  turns.forEach(m => {
+    messages.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
+  });
+  messages.push({ role: 'user', content: userText });
 
   const errors = [];
   let sawNotFound = false;
+  let quotaHits = 0, attempted = 0;
 
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
+    attempted++;
+    // 검색 도구는 gpt-oss 계열에서만 씁니다.
+    const canSearch = AI.USE_SEARCH && /gpt-oss/i.test(model);
 
     // 검색 도구를 켠 채로 먼저 시도하고, 거부당하면 도구 없이 한 번 더 시도합니다.
-    for (const useSearch of (AI.USE_SEARCH ? [true, false] : [false])) {
+    for (const useSearch of (canSearch ? [true, false] : [false])) {
       const body = {
-        systemInstruction: { parts: [{ text: aiSystemPrompt() }] },
-        contents: contents,
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: AI.MAX_OUTPUT_TOKENS
-        }
+        model: model,
+        messages: messages,
+        temperature: 0.7,
+        max_completion_tokens: AI.MAX_OUTPUT_TOKENS,
+        reasoning_effort: AI.REASONING_EFFORT || 'low',
+        stream: false
       };
-      if (useSearch) body.tools = [{ google_search: {} }];
+      if (useSearch) body.tools = [{ type: 'browser_search' }];
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), AI.TIMEOUT_MS);
       let res, textBody;
       try {
-        res = await fetch(
-          `${AI.API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: controller.signal
-          }
-        );
+        res = await fetch(`${AI.API_BASE}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + key
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
         textBody = await res.text();
       } catch (err) {
         clearTimeout(timer);
@@ -5071,16 +5300,17 @@ async function aiGenerateDirect(userText, models, isRetry) {
       clearTimeout(timer);
 
       if (!res.ok) {
-        // 검색 도구를 지원하지 않는 모델이면 도구 없이 한 번 더 시도합니다.
-        if (useSearch && /tool|google_search|function|Search Grounding/i.test(textBody)) continue;
-        if (res.status === 404 || /not found|NOT_FOUND|is not supported/i.test(textBody)) sawNotFound = true;
         const info = aiParseError(res.status, textBody);
+        // 검색 도구를 지원하지 않는 모델이면 도구 없이 한 번 더 시도합니다.
+        if (useSearch && (info.noTool || /tool|browser_search/i.test(textBody))) continue;
+        if (res.status === 404 || info.retired) sawNotFound = true;
         if (info.fatal) {
-          // 키 · 사용량 문제는 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
+          // 키 문제는 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
           const fatal = new Error('AI_FATAL');
           fatal.detail = info.message;
           throw fatal;
         }
+        if (info.quota) quotaHits++;
         errors.push(`${model}: ${info.message}`);
         break;
       }
@@ -5091,12 +5321,15 @@ async function aiGenerateDirect(userText, models, isRetry) {
         break;
       }
 
-      const cand = json.candidates && json.candidates[0];
-      const parts = cand && cand.content && cand.content.parts;
-      const text = (parts || []).map(p => p.text || '').join('').trim();
+      const choice = json.choices && json.choices[0];
+      const raw = choice && choice.message && choice.message.content;
+      const text = (typeof raw === 'string'
+        ? raw
+        : (raw || []).map(p => (typeof p === 'string' ? p : (p && p.text) || '')).join('')
+      ).trim();
 
       if (!text) {
-        const reason = cand && cand.finishReason ? ` (${cand.finishReason})` : '';
+        const reason = choice && choice.finish_reason ? ` (${choice.finish_reason})` : '';
         errors.push(`${model}: 빈 응답${reason}`);
         break;
       }
@@ -5107,10 +5340,17 @@ async function aiGenerateDirect(userText, models, isRetry) {
         model: model,
         index: i,
         total: models.length,
-        grounded: !!(cand.groundingMetadata || cand.grounding_metadata),
+        grounded: !!useSearch,
         via: 'local'
       };
     }
+  }
+
+  // 시도한 모델이 전부 "하루 한도" 였다면 그 안내를 그대로 보여줍니다.
+  if (attempted > 0 && quotaHits === attempted) {
+    const e = new Error('AI_FATAL');
+    e.detail = AI_NO_QUOTA_MSG;
+    throw e;
   }
 
   // 적어둔 이름이 전부 "없는 모델" 이면, 실제 목록을 받아와 자동으로 다시 시도합니다.
@@ -5140,36 +5380,26 @@ async function aiGenerateDirect(userText, models, isRetry) {
 
 /**
  * 받아온 목록에서 "우리가 쓰기 좋은" 모델을 골라 순서를 정합니다.
- * (Code.gs 의 aiPickModels_ 와 같은 기준입니다)
+ * (Code.gs 의 aiPickModels_ 와 같은 기준입니다 - 무료 한도가 넉넉하고 품질 좋은 순)
  */
-function aiPickModels(available, wanted) {
-  const wantLite = (wanted || []).some(w => /lite/i.test(w));
-  // 위에서부터 우선순위 ("-latest" 는 이름이 바뀌어도 그대로라 가장 안전합니다)
-  const PRIORITY = [
-    /^gemini-flash-lite-latest$/,
-    /^gemini-flash-latest$/,
-    /^gemini-3\.\d+.*-flash-lite$/,
-    /^gemini-3\.\d+.*-flash$/,
-    /^gemini-2\.5-flash-lite$/,
-    /^gemini-2\.5-flash$/,
-    /^gemini-2\.0-flash-lite(-001)?$/,
-    /^gemini-2\.0-flash(-001)?$/,
-    /^gemini-.*-flash[^-]*$/,
-    /^gemini-.*-pro[^-]*$/
-  ];
-  const rank = name => {
-    let r = PRIORITY.length;
-    for (let i = 0; i < PRIORITY.length; i++) {
-      if (PRIORITY[i].test(name)) { r = i; break; }
-    }
-    if (wantLite && !/lite/i.test(name)) r += 0.5;
-    if (/-exp|-preview|-thinking|-image|-tts|-audio|-native|-live/i.test(name)) r += 100;
-    if (/-\d{3,}$/.test(name)) r += 0.3;
-    return r;
+function aiPickModels(available) {
+  const score = name => {
+    let s = 0;
+    if (/gpt-oss/i.test(name)) s += 100;
+    if (/gpt-oss-120b/i.test(name)) s += 30;
+    if (/gpt-oss-20b/i.test(name)) s += 20;
+    if (/qwen/i.test(name)) s += 60;
+    if (/llama/i.test(name)) s += 40;
+    if (/kimi|moonshot|deepseek|mistral/i.test(name)) s += 30;
+    const v = name.match(/(\d+)(?:\.(\d+))?/);
+    if (v) s += (parseInt(v[1], 10) || 0);
+    if (/preview|instruct-0|vision|audio|speech/i.test(name)) s -= 25;
+    if (/-(1|3|4)b\b/i.test(name)) s -= 40;
+    return s;
   };
   return (available || [])
-    .filter(n => /^gemini-/.test(n) && !/embedding|gemma|learnlm/i.test(n))
-    .sort((a, b) => rank(a) - rank(b))
+    .filter(n => !/whisper|tts|guard|embed|distil/i.test(n))
+    .sort((a, b) => score(b) - score(a))
     .slice(0, 5);
 }
 
@@ -5188,7 +5418,9 @@ async function aiListModels() {
 
   const key = aiApiKey();
   if (!key) throw new Error('NO_KEY');
-  const res = await fetch(`${AI.API_BASE}/models?key=${encodeURIComponent(key)}&pageSize=200`);
+  const res = await fetch(`${AI.API_BASE}/models`, {
+    headers: { 'Authorization': 'Bearer ' + key }
+  });
   const text = await res.text();
   if (!res.ok) {
     const e = new Error('LIST_FAILED');
@@ -5196,10 +5428,10 @@ async function aiListModels() {
     throw e;
   }
   const json = JSON.parse(text);
-  return (json.models || [])
-    .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0)
-    .map(m => String(m.name || '').replace(/^models\//, ''))
-    .filter(Boolean);
+  return (json.data || json.models || [])
+    .filter(m => m && m.active !== false)
+    .map(m => String(m.id || m.name || ''))
+    .filter(n => n && !/whisper|tts|guard|embed|distil/i.test(n));
 }
 
 /* ---------- 화면 ---------- */
@@ -5232,7 +5464,8 @@ function aiModelGauge() {
 }
 
 function shortModelName(m) {
-  return String(m).replace(/^models\//, '').replace(/^gemini-/, '');
+  // openai/gpt-oss-120b → gpt-oss-120b 처럼 앞의 회사 이름은 떼어냅니다.
+  return String(m).replace(/^models\//, '').replace(/^[a-z0-9_-]+\//i, '');
 }
 
 function aiRenderMessages() {
@@ -5318,7 +5551,7 @@ async function aiSend() {
     let msg;
     if (err.message === 'NO_KEY') {
       msg = 'API 키가 아직 없습니다.\n\n' +
-        '· 권장: Apps Script → [프로젝트 설정 > 스크립트 속성] 에 GEMINI_API_KEY 를 넣고 다시 배포하세요.\n' +
+        '· 권장: Apps Script → [프로젝트 설정 > 스크립트 속성] 에 GROQ_API_KEY 를 넣고 다시 배포하세요.\n' +
         '· 급하면: 위 ⚙ [설정] → [이 기기에만 저장] 에 키를 넣어 임시로 쓸 수 있습니다.' +
         (err.detail ? '\n\n' + err.detail : '');
     }
@@ -5419,8 +5652,16 @@ function openAiSettings() {
     style: 'max-width:560px;width:100%;max-height:86vh;overflow-y:auto'
   });
   const back = h('div', { class: 'confirm-backdrop', style: 'z-index:120' }, box);
-  const close = () => { if (back.parentNode) back.parentNode.removeChild(back); };
+  const returnTo = document.activeElement;
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  const close = () => {
+    if (back.parentNode) back.parentNode.removeChild(back);
+    document.removeEventListener('keydown', onKey, true);
+    if (returnTo && returnTo.focus && document.contains(returnTo)) returnTo.focus();
+  };
   back.addEventListener('click', e => { if (e.target === back) close(); });
+  // Esc 로도 닫히게 합니다 (다른 창보다 먼저 잡아야 하므로 캡처 단계에서 듣습니다)
+  document.addEventListener('keydown', onKey, true);
 
   box.appendChild(h('h3', { text: 'AI 도우미 설정' }));
 
@@ -5439,7 +5680,7 @@ function openAiSettings() {
         mi('verified_user'),
         h('div', {}, [
           h('strong', { text: '서버에 안전하게 보관 중' }),
-          h('p', { class: 'tiny', text: 'Apps Script 의 스크립트 속성(GEMINI_API_KEY)에 있는 키를 사용합니다. 키는 이 기기로 내려오지 않습니다.' })
+          h('p', { class: 'tiny', text: 'Apps Script 의 스크립트 속성(GROQ_API_KEY)에 있는 키를 사용합니다. 키는 이 기기로 내려오지 않습니다.' })
         ])
       ]));
     } else {
@@ -5449,7 +5690,7 @@ function openAiSettings() {
           h('strong', { text: '서버에 키가 없습니다' }),
           h('p', { class: 'tiny' },
             'Apps Script → [프로젝트 설정 > 스크립트 속성] 에 ' +
-            '이름 GEMINI_API_KEY, 값에 AI Studio 키를 넣고 다시 배포하면 ' +
+            '이름 GROQ_API_KEY, 값에 Groq 키(gsk_...)를 넣고 다시 배포하면 ' +
             '두 사람 모두 키를 따로 넣지 않고 쓸 수 있습니다.')
         ])
       ]));
@@ -5461,8 +5702,8 @@ function openAiSettings() {
 
   box.appendChild(statusBox);
   box.appendChild(h('div', { class: 'row-wrap mt8' }, [
-    iconBtn('open_in_new', '스크립트 속성 넣는 법 (AI Studio)', 'btn btn-sm btn-ghost',
-      () => openExternal('https://aistudio.google.com/apikey')),
+    iconBtn('open_in_new', 'Groq 키 만들러 가기', 'btn btn-sm btn-ghost',
+      () => openExternal(AI.KEY_PAGE || 'https://console.groq.com/keys')),
     iconBtn('refresh', '서버 상태 다시 확인', 'btn btn-sm', async e => {
       const btn = e && e.currentTarget;
       if (btn) btn.disabled = true;
@@ -5479,7 +5720,7 @@ function openAiSettings() {
     '서버에 키를 넣기 전까지 임시로 쓸 수 있습니다. 여기에 넣은 키는 이 브라우저에만 저장되고 ' +
     'GitHub 에는 올라가지 않지만, 기기마다 따로 넣어야 합니다.'));
 
-  const keyInput = h('input', { type: 'password', placeholder: 'AIza... 로 시작하는 키', 'aria-label': 'Gemini API 키' });
+  const keyInput = h('input', { type: 'password', placeholder: 'gsk_... 로 시작하는 키', 'aria-label': 'Groq API 키' });
   keyInput.value = aiApiKey();
   localBox.appendChild(h('div', { class: 'row', style: 'gap:6px' }, [
     h('div', { style: 'flex:1' }, keyInput),
@@ -5578,7 +5819,7 @@ function openAiSettings() {
         clear(availBox);
         availBox.appendChild(h('p', { class: 'login-help', style: 'display:block' },
           err.message === 'NO_KEY'
-            ? '먼저 API 키를 넣어주세요. (스크립트 속성 GEMINI_API_KEY 또는 이 기기 저장)'
+            ? '먼저 API 키를 넣어주세요. (스크립트 속성 GROQ_API_KEY 또는 이 기기 저장)'
             : '모델 목록을 불러오지 못했습니다.\n' + (err.detail || err.message)));
       } finally {
         if (btn) btn.disabled = false;
@@ -5597,6 +5838,9 @@ function openAiSettings() {
   ]));
 
   document.body.appendChild(back);
+  // 열리자마자 첫 버튼에 초점을 둡니다 (키보드 · 스크린리더에서 바로 조작할 수 있도록)
+  const first = $('button, input', box);
+  if (first) first.focus();
 }
 
 /** 화면 어디서나 보이는 AI 버튼 */
@@ -5628,10 +5872,10 @@ function bindGlobalEvents() {
   $('#sideSearchBtn').addEventListener('click', () => openGlobalSearch(''));
   $('#sheetClose').addEventListener('click', () => closeSheet(false));
   $('#sheetBackdrop').addEventListener('click', e => { if (e.target === $('#sheetBackdrop')) closeSheet(false); });
-  $('#viewerClose').addEventListener('click', () => $('#viewer').classList.add('hidden'));
-  $('#viewer').addEventListener('click', e => { if (e.target === $('#viewer')) $('#viewer').classList.add('hidden'); });
-  $('#bigTextClose').addEventListener('click', () => $('#bigText').classList.add('hidden'));
-  $('#bigText').addEventListener('click', e => { if (e.target === $('#bigText')) $('#bigText').classList.add('hidden'); });
+  $('#viewerClose').addEventListener('click', () => closeOverlay('viewer'));
+  $('#viewer').addEventListener('click', e => { if (e.target === $('#viewer')) closeOverlay('viewer'); });
+  $('#bigTextClose').addEventListener('click', () => closeOverlay('bigText'));
+  $('#bigText').addEventListener('click', e => { if (e.target === $('#bigText')) closeOverlay('bigText'); });
 
   // 폼 안 어디에서 Ctrl+V 를 눌러도 첨부 칸으로 이미지·PDF 가 들어가게 합니다.
   // (글자를 붙여넣을 때는 파일이 없으므로 그대로 통과시킵니다)
@@ -5653,9 +5897,9 @@ function bindGlobalEvents() {
 
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
-    if (!$('#viewer').classList.contains('hidden')) { $('#viewer').classList.add('hidden'); return; }
+    if (!$('#viewer').classList.contains('hidden')) { closeOverlay('viewer'); return; }
     if (AIState.open) { closeAiChat(); return; }
-    if (!$('#bigText').classList.contains('hidden')) { $('#bigText').classList.add('hidden'); return; }
+    if (!$('#bigText').classList.contains('hidden')) { closeOverlay('bigText'); return; }
     if (sheetState.open) closeSheet(false);
   });
 
@@ -5678,12 +5922,19 @@ function bindGlobalEvents() {
     }
   });
 
-  // 1분마다 '오늘' 화면의 남은 시간 갱신
-  setInterval(() => { if (S.tab === 'today' && S.booted) renderToday(); }, 60000);
+  /* ---- 주기 작업 ----
+   * 화면을 보고 있지 않을 때는 아무것도 하지 않습니다.
+   * (예전에는 다른 앱을 쓰는 동안에도 1초마다 시계를 그려 배터리를 썼습니다) */
+  const visible = () => document.visibilityState === 'visible';
+
+  // 1분마다 '오늘' 화면의 남은 시간 갱신 (보고 있던 위치는 그대로 둡니다)
+  setInterval(() => {
+    if (visible() && S.tab === 'today' && S.booted && !sheetState.open) renderKeepingScroll();
+  }, 60000);
   // 시계는 화면 전체를 다시 그리지 않고 글자만 바꿔 1초마다 움직입니다.
-  setInterval(() => { if (S.tab === 'today') paintClock(); }, 1000);
+  setInterval(() => { if (visible() && S.tab === 'today') paintClock(); }, 1000);
   // 날씨는 정해진 간격마다 새로 받아옵니다.
-  setInterval(() => { if (S.booted) refreshWeather(false); }, 5 * 60000);
+  setInterval(() => { if (visible() && S.booted) refreshWeather(false); }, 5 * 60000);
 }
 
 /**
@@ -5709,6 +5960,26 @@ function waitForIconFont() {
     .catch(() => finish(false));
 }
 
+/**
+ * 서비스 워커 등록 · 새 버전 알림.
+ * 시작을 늦추지 않도록 화면이 다 뜬 뒤에 실행합니다.
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  const start = () => {
+    const base = location.pathname.replace(/[^/]*$/, '');
+    navigator.serviceWorker.register(base + 'service-worker.js').catch(() => {});
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (e.data && e.data.type === 'UPDATE_READY' && !S.updateNotified) {
+        S.updateNotified = true;
+        toast('새 버전이 준비되었습니다. 새로고침하면 적용됩니다.', 'ok', 5000);
+      }
+    });
+  };
+  if (document.readyState === 'complete') setTimeout(start, 0);
+  else window.addEventListener('load', () => setTimeout(start, 0), { once: true });
+}
+
 async function init() {
   // 테마
   const theme = lsGet('theme', '');
@@ -5726,49 +5997,35 @@ async function init() {
   bindGlobalEvents();
   updateNetDot();
   waitForIconFont();
-
-  // 서비스 워커 등록 (PWA)
-  if ('serviceWorker' in navigator) {
-    try {
-      const base = location.pathname.replace(/[^/]*$/, '');
-      await navigator.serviceWorker.register(base + 'service-worker.js');
-    } catch (e) { /* 등록 실패해도 앱은 동작합니다 */ }
-  }
+  registerServiceWorker();
 
   // 저장된 세션이 있으면 자동 로그인
   const token = lsGet('token', null);
   const me = lsGet('me', '');
-  if (token) {
-    S.token = token;
-    S.me = me;
-    showApp();
-    try {
-      const data = await api('validateSession', {}, { retry: 1, timeout: 15000 });
-      S.me = data.nickname || me;
-      lsSet('me', S.me);
-      await bootstrap(true);
-    } catch (err) {
-      if (err.code === 'INVALID_SESSION') {
-        // handleSessionExpired 가 로그인 화면으로 보냅니다.
-      } else {
-        // 오프라인이면 캐시로 계속 사용
-        const cache = lsGet(CACHE_KEY, null);
-        if (cache && cache.data) {
-          applyBootstrap(cache.data);
-          S.booted = true;
-          updateHeader();
-          ensureDefaultDates();
-          switchTab('today');
-          updateSyncBar('오프라인 - 저장된 자료 (' + fmtSyncTime(cache.at) + ')');
-          toast('오프라인 상태입니다. 저장된 자료를 보여줍니다.', 'error', 3200);
-        } else {
-          renderLoadError(err);
-        }
-      }
-    }
-  } else {
-    showLogin();
+  if (!token) { showLogin(); return; }
+
+  S.token = token;
+  S.me = me;
+  showApp();
+
+  /* ---- 저장해 둔 자료가 있으면 먼저 그려서 바로 쓸 수 있게 합니다 ----
+   * 예전에는 서버 응답을 두 번(세션 확인 + 자료 받기) 기다린 뒤에야
+   * 화면이 나타나서 처음 열 때 5초 이상 걸렸습니다.
+   * 이제는 저장된 자료로 즉시 화면을 띄우고, 최신 자료는 뒤에서 받아옵니다. */
+  const cache = lsGet(CACHE_KEY, null);
+  const hasCache = !!(cache && cache.data);
+  if (hasCache) {
+    applyBootstrap(cache.data);
+    S.booted = true;
+    updateHeader();
+    ensureDefaultDates();
+    switchTab('today');
+    updateSyncBar('저장된 자료 (' + fmtSyncTime(cache.at) + ') · 최신 정보 확인 중…');
   }
+
+  // 세션 확인은 따로 하지 않습니다. getBootstrapData 가 토큰까지 함께 확인하므로
+  // 왕복 한 번을 줄일 수 있습니다. (만료되었으면 자동으로 로그인 화면으로 갑니다)
+  await bootstrap(!hasCache);
 }
 
 document.addEventListener('DOMContentLoaded', init);
