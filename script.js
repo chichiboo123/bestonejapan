@@ -4869,8 +4869,11 @@ function toggleTheme() {
  * · 화면 어디서나 오른쪽 아래 ✨ 버튼으로 열 수 있습니다.
  * · 앱에 저장된 여행 정보(일정·항공·숙소·예약·기록 등)를 함께 보내
  *   "내일 몇 시에 나가야 해?" 같은 질문에 우리 데이터로 답합니다.
- * · 앱에 없는 내용은 구글 검색을 사용해 답합니다(지원 모델일 때).
- * · 모델은 정해진 순서대로 시도하고, 없거나(404) 사용량이 꽉 차면(429/503)
+ * · 앱에 없는 내용은 모델이 아는 지식으로 답하고, 확실하지 않으면
+ *   "확실하지 않다" 고 밝히도록 했습니다.
+ *   (웹 검색 도구는 너무 느려서 Apps Script 실행이 끊기는 원인이 되어 기본 꺼짐.
+ *    config.js 의 AI_CONFIG.USE_SEARCH 로 켤 수 있습니다)
+ * · 모델은 정해진 순서대로 시도하고, 없거나(404) 사용량이 꽉 차면(429)
  *   자동으로 다음 모델로 넘어갑니다.
  *
  * ★ API 키를 두는 곳 (중요)
@@ -4890,8 +4893,49 @@ const AI_KEYS = {
   apiKey: 'aiApiKey',        // (예비 수단) 이 기기에만 저장하는 개인 키
   models: 'aiModels',        // 사용자가 고른 모델 순서
   lastGood: 'aiLastGood',    // 마지막으로 성공한 모델
-  history: 'aiHistory'
+  history: 'aiHistory',
+  provider: 'aiProvider'     // 이 브라우저에 저장된 설정이 어느 회사 것인지
 };
+
+/**
+ * AI 회사가 바뀌었으면 이 브라우저에 저장된 옛 설정을 정리합니다.
+ *
+ * ★ 왜 필요한가요?
+ *   모델 순서와 개인 키는 "이 브라우저" 에 저장됩니다. 그래서 앱을 Groq 으로
+ *   바꿔도, 예전에 쓰던 Gemini 모델 이름(gemini-3.5-flash-lite …)이 그대로 남아
+ *   설정 화면에 보이고 그대로 서버에 보내집니다. 있지도 않은 이름들이라
+ *   매번 헛걸음을 하게 되고, 남아 있던 Gemini 키(AIza…)로 직접 부르면
+ *   인증 오류가 납니다.
+ *   그래서 회사가 바뀐 것을 확인하면 한 번만 조용히 지웁니다.
+ */
+/** 지금 회사에서 쓸 수 없는 것이 확실한 모델 이름 (예전 Gemini 이름 등) */
+function aiLooksForeignModel(name) {
+  return /^(models\/)?gemini[-.]/i.test(String(name || ''));
+}
+
+function aiMigrateProvider() {
+  const now = AI.PROVIDER || 'groq';
+  const saved = lsGet(AI_KEYS.provider, '');
+
+  // 도장이 안 찍혀 있거나 다른 회사이면 정리 대상입니다.
+  const providerChanged = saved !== now;
+  // 도장과 상관없이, 목록에 옛 회사 이름이 섞여 있어도 정리합니다.
+  // (도장을 찍은 뒤에 예전 목록이 되살아나는 경우까지 막기 위해서입니다)
+  const list = lsGet(AI_KEYS.models, null);
+  const hasForeign = Array.isArray(list) && list.some(aiLooksForeignModel);
+
+  if (!providerChanged && !hasForeign) return;
+
+  lsDel(AI_KEYS.models);
+  lsDel(AI_KEYS.lastGood);
+  // 예전 회사의 개인 키는 새 회사에서 쓸 수 없으므로 함께 지웁니다.
+  if (providerChanged) lsDel(AI_KEYS.apiKey);
+  lsSet(AI_KEYS.provider, now);
+
+  if (saved || hasForeign) {
+    toast('AI 를 ' + (AI.PROVIDER_LABEL || now) + ' 로 바꿨습니다. 모델 설정을 새로 맞췄습니다.', 'ok', 4000);
+  }
+}
 
 const AIState = {
   open: false,
@@ -5191,9 +5235,20 @@ async function aiListModelsCached() {
  * [기본] Apps Script 를 거쳐서 부르기.
  * 브라우저는 세션 토큰만 보내고, API 키는 서버 안에서만 쓰입니다.
  */
-async function aiGenerateViaServer(userText, models) {
-  const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
-  const contents = turns.map(m => ({
+/**
+ * 대화 기록에서 모델에게 다시 보낼 것만 골라냅니다.
+ * 오류 안내 말풍선(빨간 글)은 대화가 아니라 우리 앱이 쓴 안내문이므로 빼야 합니다.
+ * (그대로 보내면 AI 가 그 안내문을 자기가 한 말로 착각하고, 길이만 늘어납니다)
+ */
+function aiHistoryForRequest() {
+  return AIState.messages
+    .filter(m => !m.isError && String(m.text || '').trim())
+    .slice(-(AI.HISTORY_TURNS * 2));
+}
+
+async function aiGenerateViaServer(userText, models, opts) {
+  opts = opts || {};
+  const contents = aiHistoryForRequest().map(m => ({
     role: m.role === 'user' ? 'user' : 'model',
     text: m.text
   }));
@@ -5203,9 +5258,10 @@ async function aiGenerateViaServer(userText, models) {
   try {
     data = await api('aiChat', {
       system: aiSystemPrompt(),
-      contents: contents,
+      contents: opts.short ? contents.slice(-1) : contents,
       models: models,
-      useSearch: AI.USE_SEARCH !== false,
+      // 검색 도구는 켜달라고 했을 때만 (느려서 응답이 끊길 수 있습니다)
+      useSearch: opts.noSearch ? false : AI.USE_SEARCH === true,
       maxOutputTokens: AI.MAX_OUTPUT_TOKENS
     }, { timeout: Math.max(AI.TIMEOUT_MS, 60000), retry: 0 });
   } catch (err) {
@@ -5224,6 +5280,29 @@ async function aiGenerateViaServer(userText, models) {
       e.detail = err.message;
       throw e;
     }
+
+    /* ---- Apps Script 가 답을 돌려주지 못한 경우 ----
+     * 'HTTP 404' 는 Groq 의 오류가 아니라, Apps Script 실행이 너무 오래 걸려
+     * 응답이 저장되지 않았다는 뜻입니다. (googleusercontent.com/macros/echo 404)
+     * 이때는 보낼 내용을 확 줄여 딱 한 번만 다시 시도합니다. */
+    if ((code === 'BAD_RESPONSE' || code === 'TIMEOUT') && !opts.retried) {
+      return aiGenerateViaServer(userText, models,
+        { retried: true, noSearch: true, short: true });
+    }
+    if (code === 'BAD_RESPONSE' || code === 'TIMEOUT') {
+      const e = new Error('AI_FATAL');
+      e.detail =
+        '서버가 제때 답을 돌려주지 못했습니다.\n\n' +
+        '질문이 복잡하거나 검색이 필요한 경우, Apps Script 가 기다리다 지쳐\n' +
+        '응답을 잃어버릴 수 있습니다. (개발자 도구에 macros/echo 404 로 보입니다)\n\n' +
+        '[이렇게 해보세요]\n' +
+        '· 질문을 조금 더 짧고 구체적으로 바꿔서 다시 물어보기\n' +
+        '· ⚙ [설정] → [모델 순서] 에서 openai/gpt-oss-20b 를 맨 위로 올리기\n' +
+        '  (더 가볍고 빨라서 잘 끊기지 않습니다)\n' +
+        '· 잠시 뒤 다시 시도하기';
+      throw e;
+    }
+
     const e = new Error('AI_FAILED');
     e.detail = (err && err.message) || '서버에서 답을 받지 못했습니다.';
     throw e;
@@ -5249,9 +5328,8 @@ async function aiGenerateDirect(userText, models, isRetry) {
   if (!key) throw new Error('NO_KEY');
 
   // 최근 대화 (Groq 은 OpenAI 형식이라 system 도 messages 안에 넣습니다)
-  const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
   const messages = [{ role: 'system', content: aiSystemPrompt() }];
-  turns.forEach(m => {
+  aiHistoryForRequest().forEach(m => {
     messages.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
   });
   messages.push({ role: 'user', content: userText });
@@ -5263,8 +5341,8 @@ async function aiGenerateDirect(userText, models, isRetry) {
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
     attempted++;
-    // 검색 도구는 gpt-oss 계열에서만 씁니다.
-    const canSearch = AI.USE_SEARCH && /gpt-oss/i.test(model);
+    // 검색 도구는 켜달라고 했을 때만, 그리고 gpt-oss 계열에서만 씁니다.
+    const canSearch = AI.USE_SEARCH === true && /gpt-oss/i.test(model);
 
     // 검색 도구를 켠 채로 먼저 시도하고, 거부당하면 도구 없이 한 번 더 시도합니다.
     for (const useSearch of (canSearch ? [true, false] : [false])) {
@@ -5398,7 +5476,7 @@ function aiPickModels(available) {
     return s;
   };
   return (available || [])
-    .filter(n => !/whisper|tts|guard|embed|distil/i.test(n))
+    .filter(n => !/whisper|tts|guard|embed|distil|orpheus|canopylabs|compound/i.test(n))
     .sort((a, b) => score(b) - score(a))
     .slice(0, 5);
 }
@@ -5431,7 +5509,7 @@ async function aiListModels() {
   return (json.data || json.models || [])
     .filter(m => m && m.active !== false)
     .map(m => String(m.id || m.name || ''))
-    .filter(n => n && !/whisper|tts|guard|embed|distil/i.test(n));
+    .filter(n => n && !/whisper|tts|guard|embed|distil|orpheus|canopylabs|compound/i.test(n));
 }
 
 /* ---------- 화면 ---------- */
@@ -5998,6 +6076,7 @@ async function init() {
   updateNetDot();
   waitForIconFont();
   registerServiceWorker();
+  aiMigrateProvider();     // AI 회사가 바뀌었으면 옛 모델 목록 · 키를 정리
 
   // 저장된 세션이 있으면 자동 로그인
   const token = lsGet('token', null);

@@ -1804,7 +1804,10 @@ function logActivity_(nickname, action, target, detail) {
 var AI_DEFAULT_MODELS_ = [
   'openai/gpt-oss-120b',
   'openai/gpt-oss-20b',
-  'qwen/qwen3.6-27b'
+  'qwen/qwen3.6-27b',
+  // 계정에 따라 위 세 개 중 일부가 없을 수 있어 마지막 보루를 하나 더 둡니다.
+  // (없는 이름은 두드려 보지도 않으므로 적어두어도 손해가 없습니다)
+  'llama-3.3-70b-versatile'
 ];
 
 var AI_BASE_DEFAULT_ = 'https://api.groq.com/openai/v1';
@@ -1962,10 +1965,15 @@ function apiAiChat_(req, ctx) {
   }
   if (messages.length === (system ? 1 : 0)) return fail_('AI_NO_INPUT', '보낼 내용이 없습니다.');
 
-  var useSearch = req.useSearch !== false;
-  var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1200, 128), 8192);
+  // ★ 검색 도구(browser_search)는 "켜달라고 했을 때만" 씁니다.
+  //   이 도구는 Groq 서버가 실제로 웹을 돌아다니며 찾아보는 방식이라 오래 걸립니다.
+  //   Apps Script 를 거치는 구조에서는 그 시간 때문에 실행이 끊기고
+  //   응답이 통째로 사라져(HTTP 404) 답이 아예 안 오는 일이 있었습니다.
+  var useSearch = req.useSearch === true;
+  var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 2048, 256), 8192);
 
   var opts = { useSearch: useSearch, maxTokens: maxTokens };
+  var chatStartedAt = new Date().getTime();
 
   // ---- 실제로 쓸 수 있는 모델만 남깁니다 ----
   // Groq 도 모델을 자주 갈아치우므로, 지금 이 키로 부를 수 있는 목록을
@@ -2002,7 +2010,8 @@ function apiAiChat_(req, ctx) {
   }
 
   // ---- 여기까지 왔다면 목록을 새로 받아 한 번 더 시도합니다 ----
-  var fresh = aiFetchModelList_(key);
+  // 단, 이미 오래 걸렸다면 더 하지 않습니다. (실행이 끊겨 응답이 사라지는 것을 막습니다)
+  var fresh = (new Date().getTime() - chatStartedAt) > 40000 ? [] : aiFetchModelList_(key);
   if (fresh.length) {
     aiPutModelList_(fresh);
     var retry = aiDropRetired_(aiPickModels_(fresh, models));
@@ -2164,15 +2173,27 @@ function aiRunModels_(key, models, messages, opts) {
   var retired = [];
   var attempted = 0;
   var quotaHits = 0;
+  var startedAt = new Date().getTime();
+
+  /* ★ 시간 예산 (아주 중요)
+   *
+   * Apps Script 는 실행이 너무 오래 걸리면 중간에 끊기고, 그러면 응답이
+   * 아예 저장되지 않아 브라우저가 googleusercontent.com/macros/echo 에서
+   * "404" 를 받습니다. (앱에는 'HTTP 404' 라고 나옵니다)
+   * 그래서 여러 모델을 두드리다가도 아래 시간이 지나면 멈추고,
+   * 지금까지의 결과라도 반드시 돌려줍니다.
+   */
+  var BUDGET_MS = 45000;
+  function outOfTime_() { return (new Date().getTime() - startedAt) > BUDGET_MS; }
 
   for (var mi = 0; mi < models.length; mi++) {
+    if (mi > 0 && outOfTime_()) { errors.push('시간이 오래 걸려 나머지 모델은 건너뛰었습니다'); break; }
     var model = models[mi];
     attempted++;
 
     // 검색 도구를 켜고 먼저 시도 → 지원하지 않으면 끄고 한 번 더
     var wantSearch = opts.useSearch && aiSupportsSearch_(model);
     var tries = wantSearch ? [true, false] : [false];
-    var waited = false;
 
     for (var t = 0; t < tries.length; t++) {
       var payload = {
@@ -2224,13 +2245,10 @@ function aiRunModels_(key, models, messages, opts) {
         }
         if (info.retired) retired.push(model);
         else aiCooldown_(model);
-        if (info.retryable && info.retryAfter && info.retryAfter <= 15 && !waited) {
-          // 잠깐 기다리면 되는 경우에는 한 번만 쉬었다가 같은 모델로 다시 해봅니다.
-          waited = true;
-          Utilities.sleep(info.retryAfter * 1000 + 400);
-          t--;
-          continue;
-        }
+        // 예전에는 여기서 Utilities.sleep 으로 기다렸다가 다시 시도했습니다.
+        // 그런데 그 시간이 Apps Script 실행 시간을 통째로 잡아먹어
+        // 응답 자체가 사라지는(HTTP 404) 원인이 되었습니다.
+        // 이제는 기다리지 않고 바로 다음 모델로 넘어갑니다.
         errors.push(model + ': ' + info.message);
         break;
       }
@@ -2246,8 +2264,9 @@ function aiRunModels_(key, models, messages, opts) {
 
       if (!out) {
         var why = (choice && choice.finish_reason) || '';
-        // 생각하는 데 글자 수를 다 써버린 경우에는 넉넉히 늘려 한 번 더 시도합니다.
-        if (why === 'length' && !opts._retriedTokens) {
+        // gpt-oss 같은 모델은 "생각"에도 글자 수를 씁니다.
+        // 생각하다가 다 써버려 답이 비면, 넉넉히 늘려 한 번만 더 시도합니다.
+        if (why === 'length' && !opts._retriedTokens && !outOfTime_()) {
           opts._retriedTokens = true;
           opts.maxTokens = Math.min(opts.maxTokens * 3, 8192);
           t--;                       // 같은 모델로 다시
@@ -2320,16 +2339,22 @@ function aiParseModelList_(bodyText) {
   for (var i = 0; i < arr.length; i++) {
     var id = String(arr[i].id || arr[i].name || '');
     if (!id) continue;
-    // 음성 인식(whisper) · 음성 합성(tts) · 안전 필터(guard) 는 대화에 쓰지 않습니다.
-    if (/whisper|tts|guard|embed|prompt-?guard|distil/i.test(id)) continue;
+    // 대화용이 아닌 모델은 제외합니다.
+    //   whisper : 음성 인식 / orpheus·tts : 음성 합성 / guard : 안전 필터
+    //   compound : 웹을 돌아다니며 답하는 방식이라 Apps Script 로는 너무 느립니다
+    if (/whisper|tts|guard|embed|prompt-?guard|distil|orpheus|canopylabs|compound/i.test(id)) continue;
     if (arr[i].active === false) continue;
     list.push(id);
   }
   return list;
 }
 
-/** 한 번의 질문에서 시도할 최대 모델 수 (헛 호출로 시간을 낭비하지 않도록) */
-var AI_MAX_ATTEMPTS_ = 3;
+/**
+  * 한 번의 질문에서 시도할 최대 모델 수.
+  * Apps Script 는 실행이 길어지면 응답 자체가 사라지므로(HTTP 404),
+  * 여러 모델을 오래 두드리기보다 빨리 답하거나 빨리 포기하는 편이 낫습니다.
+  */
+var AI_MAX_ATTEMPTS_ = 2;
 
 /** 실패한 모델을 잠시 뒤로 미루는 시간 (초) */
 var AI_COOLDOWN_TTL_ = 600;
