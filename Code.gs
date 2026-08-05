@@ -225,6 +225,28 @@ var TRIP_KEYS = [
 function doGet(e) {
   try {
     var params = (e && e.parameter) ? e.parameter : {};
+
+    // 앱은 값을 payload 하나에 JSON 으로 담아 보냅니다.
+    // (주소로 보내면 숫자 · 참거짓이 모두 글자로 바뀌기 때문입니다)
+    //
+    // ★ 왜 GET 도 받나요?
+    //   Apps Script 는 응답 전에 googleusercontent.com 으로 한 번 넘기는데,
+    //   POST 요청은 이때 CORS 헤더가 사라져 브라우저가 막는 일이 있습니다.
+    //   (아이폰 사파리 · 안드로이드 크롬에서 자주 나타납니다)
+    //   그래서 앱은 짧은 요청을 GET 으로 보냅니다.
+    if (params.payload) {
+      try {
+        var parsed = JSON.parse(params.payload);
+        if (parsed && typeof parsed === 'object') {
+          for (var k in parsed) {
+            if (Object.prototype.hasOwnProperty.call(parsed, k)) params[k] = parsed[k];
+          }
+        }
+      } catch (parseErr) {
+        return jsonOut_(fail_('BAD_REQUEST', '요청을 해석할 수 없습니다.'));
+      }
+    }
+
     if (!params.action) {
       return jsonOut_({
         success: true,
@@ -1766,12 +1788,17 @@ function apiAiChat_(req, ctx) {
   tried = aiDropRetired_(tried);
   if (!tried.length) tried = models;
 
+  // 직전에 성공한 모델을 맨 앞으로, 최근 실패한 모델은 뒤로 미룹니다.
+  // 그리고 한 번에 세 개까지만 시도해 오래 기다리는 일이 없게 합니다.
+  tried = aiOrderForAttempt_(tried).slice(0, AI_MAX_ATTEMPTS_);
+
   var run = aiRunModels_(key, tried, contents, opts);
   aiRememberRetired_(run.retired);
 
   if (run.noQuota) return fail_('AI_NO_QUOTA', run.fatal);
   if (run.fatal) return fail_('AI_KEY_ERROR', run.fatal);
   if (run.result) {
+    aiRememberGood_(run.result.model);
     // 적어둔 목록에 없던 모델이 대신 답한 경우에만 알려줍니다.
     if (models.indexOf(run.result.model) < 0) {
       run.result.autoPicked = true;
@@ -1786,7 +1813,7 @@ function apiAiChat_(req, ctx) {
     aiPutModelList_(fresh);
     var retry = aiDropRetired_(aiPickModels_(fresh, models));
     var todo = [];
-    for (var r = 0; r < retry.length; r++) {
+    for (var r = 0; r < retry.length && todo.length < AI_MAX_ATTEMPTS_; r++) {
       if (tried.indexOf(retry[r]) < 0) todo.push(retry[r]);
     }
     if (todo.length) {
@@ -1795,6 +1822,7 @@ function apiAiChat_(req, ctx) {
       if (run2.noQuota) return fail_('AI_NO_QUOTA', run2.fatal);
       if (run2.fatal) return fail_('AI_KEY_ERROR', run2.fatal);
       if (run2.result) {
+        aiRememberGood_(run2.result.model);
         run2.result.autoPicked = true;
         return ok_(run2.result, '적어둔 모델 대신 ' + run2.result.model + ' 로 답했습니다.');
       }
@@ -1881,6 +1909,43 @@ function aiRememberRetired_(list) {
   catch (e) { /* 무시 */ }
 }
 
+/** 직전에 성공한 모델을 기억합니다 */
+function aiRememberGood_(model) {
+  try { CacheService.getScriptCache().put('aiLastGood', model, 21600); }
+  catch (e) { /* 무시 */ }
+}
+
+/** 실패한 모델을 잠시 뒤로 미룹니다 */
+function aiCooldown_(model) {
+  try { CacheService.getScriptCache().put('aiCd_' + model, '1', AI_COOLDOWN_TTL_); }
+  catch (e) { /* 무시 */ }
+}
+
+function aiIsCoolingDown_(model) {
+  try { return !!CacheService.getScriptCache().get('aiCd_' + model); }
+  catch (e) { return false; }
+}
+
+/**
+ * 시도 순서를 정합니다.
+ *   1) 직전에 성공한 모델을 맨 앞으로 (대개 한 번에 끝납니다)
+ *   2) 최근에 실패한 모델은 맨 뒤로 (헛 호출 방지)
+ */
+function aiOrderForAttempt_(models) {
+  var lastGood = '';
+  try { lastGood = CacheService.getScriptCache().get('aiLastGood') || ''; }
+  catch (e) { lastGood = ''; }
+
+  var head = [], mid = [], tail = [];
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    if (m === lastGood) head.push(m);
+    else if (aiIsCoolingDown_(m)) tail.push(m);
+    else mid.push(m);
+  }
+  return head.concat(mid, tail);
+}
+
 function aiDropRetired_(models) {
   var bad = aiRetiredModels_();
   if (!bad.length) return models;
@@ -1946,6 +2011,7 @@ function aiRunModels_(key, models, contents, opts) {
           };
         }
         if (info.retired) retired.push(model);
+        else aiCooldown_(model);   // 잠시 뒤로 미룹니다
         if (info.retryable && info.retryAfter && info.retryAfter <= 20 && !opts._waited) {
           // 잠깐 기다리면 되는 경우에는 한 번만 쉬었다가 같은 모델로 다시 해봅니다.
           opts._waited = true;
@@ -2017,6 +2083,29 @@ function aiFetchModelList_(key) {
     return list;
   } catch (e) { return []; }
 }
+
+/**
+ * 선호하는 모델 (위에서부터 우선순위).
+ * "-latest" 는 구글이 모델 이름을 바꿔도 그대로 남아서 가장 안전합니다.
+ */
+var AI_MODEL_PRIORITY_ = [
+  /^gemini-flash-lite-latest$/,
+  /^gemini-flash-latest$/,
+  /^gemini-3\.\d+.*-flash-lite$/,
+  /^gemini-3\.\d+.*-flash$/,
+  /^gemini-2\.5-flash-lite$/,
+  /^gemini-2\.5-flash$/,
+  /^gemini-2\.0-flash-lite(-001)?$/,
+  /^gemini-2\.0-flash(-001)?$/,
+  /^gemini-.*-flash[^-]*$/,   // 그 밖의 flash 계열
+  /^gemini-.*-pro[^-]*$/      // pro 계열
+];
+
+/** 한 번의 질문에서 시도할 최대 모델 수 (헛 호출로 시간을 낭비하지 않도록) */
+var AI_MAX_ATTEMPTS_ = 3;
+
+/** 실패한 모델을 잠시 뒤로 미루는 시간 (초) */
+var AI_COOLDOWN_TTL_ = 600;
 
 /**
  * 받아온 목록에서 "우리가 쓰기 좋은" 모델을 골라 순서를 정합니다.

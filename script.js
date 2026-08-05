@@ -261,6 +261,28 @@ function apiError(code, message) {
  * - redirect: 'follow' (Apps Script 는 응답 전에 리디렉션합니다)
  * - no-cors 는 사용하지 않습니다(응답을 읽어야 하므로).
  */
+/**
+ * 요청을 GET 주소로 바꿉니다. 길이가 너무 길면 null 을 돌려줍니다.
+ *
+ * ★ 왜 GET 을 먼저 쓰나요?
+ *   Apps Script 웹 앱은 응답하기 전에 googleusercontent.com 으로 한 번 넘깁니다.
+ *   이때 POST 요청은 브라우저에 따라 CORS 헤더가 사라져 차단되는 일이 있습니다.
+ *   특히 아이폰 사파리와 안드로이드 크롬에서 자주 나타납니다.
+ *   GET 은 이 과정에서 문제가 없어서, 짧은 요청은 GET 으로 보냅니다.
+ *   (사진 · 영상처럼 긴 요청은 주소에 담을 수 없으므로 POST 로 보냅니다)
+ */
+const GET_URL_MAX = 6000;
+
+function buildGetUrl(url, body) {
+  // 값을 하나하나 주소에 넣으면 숫자 · 참거짓이 모두 글자로 바뀌어 버립니다.
+  // 그래서 통째로 payload 하나에 담아 보냅니다. (POST 와 똑같은 모양)
+  const q = new URLSearchParams();
+  q.set('action', String(body.action || ''));
+  q.set('payload', JSON.stringify(body));
+  const full = url + (url.indexOf('?') >= 0 ? '&' : '?') + q.toString();
+  return full.length > GET_URL_MAX ? null : full;
+}
+
 async function callApi(action, payload, opts) {
   opts = opts || {};
   const url = API.API_URL;
@@ -272,6 +294,9 @@ async function callApi(action, payload, opts) {
   const body = Object.assign({ action: action }, payload || {});
   if (S.token && !body.token) body.token = S.token;
 
+  // 짧은 요청은 GET, 긴 요청(업로드 등)은 POST
+  const getUrl = opts.forcePost ? null : buildGetUrl(url, body);
+
   const attempts = (opts.retry === undefined ? API.RETRY : opts.retry) + 1;
   let lastErr = null;
 
@@ -279,14 +304,16 @@ async function callApi(action, payload, opts) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeout || API.TIMEOUT_MS);
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        // text/plain 은 CORS 안전 목록에 있어 preflight 가 발생하지 않습니다.
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(body),
-        redirect: 'follow',
-        signal: controller.signal
-      });
+      const res = getUrl
+        ? await fetch(getUrl, { method: 'GET', redirect: 'follow', signal: controller.signal })
+        : await fetch(url, {
+            method: 'POST',
+            // text/plain 은 CORS 안전 목록에 있어 preflight 가 발생하지 않습니다.
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(body),
+            redirect: 'follow',
+            signal: controller.signal
+          });
       clearTimeout(timer);
 
       if (!res.ok) throw apiError('BAD_RESPONSE', 'HTTP ' + res.status);
@@ -422,6 +449,16 @@ function speakJa(text) {
 function openExternal(url) {
   if (!url) return;
   window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+/**
+ * 아이폰 · 아이패드인지 확인합니다.
+ * (아이패드는 최근 기종에서 자신을 Mac 이라고 알려주므로 터치 여부도 함께 봅니다)
+ */
+function isIOS() {
+  const ua = navigator.userAgent || '';
+  return /iPad|iPhone|iPod/.test(ua) ||
+    (/Macintosh/.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
 }
 function mapsSearchUrl(query) {
   return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(String(query || ''));
@@ -2039,7 +2076,9 @@ function openGallery(urls, label, startIndex, opts) {
         if (myIdx !== idx) return;
         clear(wrap);
         wrap.appendChild(h('video', {
-          src: blobUrl, controls: true, playsinline: true, preload: 'metadata',
+          src: blobUrl, controls: true, preload: 'metadata',
+          // 아이폰에서 전체 화면으로 튀어나가지 않고 그 자리에서 재생되도록
+          playsinline: true, 'webkit-playsinline': true,
           onclick: e => e.stopPropagation()
         }));
       }).catch(err => {
@@ -2067,6 +2106,19 @@ function openGallery(urls, label, startIndex, opts) {
         frameWrap.appendChild(h('iframe', {
           src: blobUrl, title: (label || '문서'), allow: 'fullscreen'
         }));
+        // 받아온 파일을 그대로 크게 볼 수 있는 버튼을 함께 둡니다.
+        const tools = $('.viewer-tools', inner);
+        if (tools) {
+          tools.insertBefore(
+            iconBtn('open_in_full', '전체 화면으로 보기', 'btn btn-sm btn-ghost',
+              e => { if (e) e.stopPropagation(); openExternal(blobUrl); }),
+            tools.firstChild);
+        }
+        // 아이폰 · 아이패드 사파리는 PDF 를 작은 창 안에 못 그리는 경우가 많습니다.
+        if (isIOS()) {
+          frameWrap.appendChild(h('div', { class: 'viewer-doc-note' },
+            '아이폰에서는 PDF 가 이 창에 안 보일 수 있습니다.\n아래 [전체 화면으로 보기] 를 눌러주세요.'));
+        }
       }).catch(err => {
         if (myIdx !== idx) return;
         clear(frameWrap);
@@ -5092,23 +5144,32 @@ async function aiGenerateDirect(userText, models, isRetry) {
  */
 function aiPickModels(available, wanted) {
   const wantLite = (wanted || []).some(w => /lite/i.test(w));
-  const score = name => {
-    let s = 0;
-    if (/^gemini-/.test(name)) s += 100;
-    // "-latest" 는 구글이 이름을 바꿔도 그대로라서 가장 안전합니다.
-    if (/-latest$/.test(name)) s += 60;
-    if (/flash/i.test(name)) s += 40;
-    if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
-    if (/pro/i.test(name)) s += 10;
-    const v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
-    if (v) s += (Number(v[1]) || 0) * 6 + (Number(v[2]) || 0);
-    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma|live|native/i.test(name)) s -= 80;
-    if (/\d{3,}/.test(name)) s -= 15;
-    return s;
+  // 위에서부터 우선순위 ("-latest" 는 이름이 바뀌어도 그대로라 가장 안전합니다)
+  const PRIORITY = [
+    /^gemini-flash-lite-latest$/,
+    /^gemini-flash-latest$/,
+    /^gemini-3\.\d+.*-flash-lite$/,
+    /^gemini-3\.\d+.*-flash$/,
+    /^gemini-2\.5-flash-lite$/,
+    /^gemini-2\.5-flash$/,
+    /^gemini-2\.0-flash-lite(-001)?$/,
+    /^gemini-2\.0-flash(-001)?$/,
+    /^gemini-.*-flash[^-]*$/,
+    /^gemini-.*-pro[^-]*$/
+  ];
+  const rank = name => {
+    let r = PRIORITY.length;
+    for (let i = 0; i < PRIORITY.length; i++) {
+      if (PRIORITY[i].test(name)) { r = i; break; }
+    }
+    if (wantLite && !/lite/i.test(name)) r += 0.5;
+    if (/-exp|-preview|-thinking|-image|-tts|-audio|-native|-live/i.test(name)) r += 100;
+    if (/-\d{3,}$/.test(name)) r += 0.3;
+    return r;
   };
   return (available || [])
-    .filter(n => /^gemini-/.test(n))
-    .sort((a, b) => score(b) - score(a))
+    .filter(n => /^gemini-/.test(n) && !/embedding|gemma|learnlm/i.test(n))
+    .sort((a, b) => rank(a) - rank(b))
     .slice(0, 5);
 }
 
