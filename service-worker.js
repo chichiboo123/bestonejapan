@@ -8,7 +8,7 @@
  *   그러면 브라우저가 새 파일을 다시 받아옵니다.
  * ========================================================================= */
 
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const SHELL_CACHE = 'bestone-shell-' + CACHE_VERSION;
 const DATA_CACHE  = 'bestone-media-' + CACHE_VERSION;
 

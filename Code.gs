@@ -365,6 +365,7 @@ function handleRequest_(req) {
       /* ------- 이미지 ------- */
       case 'uploadImage': return jsonOut_(apiUploadImage_(req, ctx));
       case 'deleteImage': return jsonOut_(apiDeleteImage_(req, ctx));
+      case 'getFileData': return jsonOut_(apiGetFileData_(req, ctx));
 
       /* ------- 일정에 예약 추가 ------- */
       case 'addReservationToSchedule': return jsonOut_(apiReservationToSchedule_(req, ctx));
@@ -1233,6 +1234,91 @@ function apiDeleteImage_(req, ctx) {
   return deleteEntity_('Photos', { id: target.id }, ctx);
 }
 
+/**
+ * 첨부 파일(주로 PDF)의 내용을 직접 내려보냅니다.
+ *
+ * ★ 왜 필요한가요?
+ *   Google Drive 의 미리보기 주소(/preview)를 앱 안 iframe 에 넣으면
+ *   Drive 가 자기 로그인 페이지를 다시 iframe 으로 열려고 하는데,
+ *   Drive 스스로 "frame-ancestors" 규칙으로 그것을 막아버립니다.
+ *   그래서 화면이 검게 나오거나 문서가 잘려 보입니다.
+ *   (브라우저가 서드파티 쿠키를 막으면 거의 항상 이렇게 됩니다)
+ *
+ *   그래서 Drive 화면을 빌려 쓰지 않고, 파일 내용만 받아와서
+ *   브라우저에 내장된 PDF 뷰어로 직접 보여줍니다.
+ *
+ * 요청: { action:'getFileData', token, fileId 또는 url }
+ * 응답: { base64, mimeType, name, size }
+ */
+function apiGetFileData_(req, ctx) {
+  var fileId = sanitizeText_(req.fileId, 120) || driveFileIdFromUrl_(req.url);
+  if (!fileId) return fail_('NO_FILE', '파일을 찾을 수 없습니다.');
+
+  // ---- 우리 여행에 속한 파일인지 확인 ----
+  // (로그인만 했다고 해서 주인의 다른 Drive 파일까지 볼 수 있으면 안 됩니다)
+  if (!isOurDriveFile_(fileId)) {
+    return fail_('FORBIDDEN', '이 앱에서 올린 파일이 아니어서 열 수 없습니다.');
+  }
+
+  var file;
+  try {
+    file = DriveApp.getFileById(fileId);
+  } catch (e) {
+    return fail_('NOT_FOUND', '파일이 삭제되었거나 접근할 수 없습니다.');
+  }
+
+  var size = 0;
+  try { size = file.getSize(); } catch (e2) { size = 0; }
+  // base64 로 바꾸면 약 1.37배가 되므로 넉넉잡아 제한합니다.
+  if (size > 18 * 1024 * 1024) {
+    return fail_('TOO_LARGE', '파일이 너무 커서 앱 안에서 열 수 없습니다. [새 탭에서 열기] 를 사용해 주세요.');
+  }
+
+  var blob = file.getBlob();
+  return ok_({
+    fileId: fileId,
+    name: file.getName(),
+    mimeType: blob.getContentType() || 'application/octet-stream',
+    size: size,
+    base64: Utilities.base64Encode(blob.getBytes())
+  }, '');
+}
+
+/** 여러 형태의 Drive 주소에서 파일 ID 만 뽑아냅니다 */
+function driveFileIdFromUrl_(url) {
+  var s = String(url || '');
+  var m = s.match(/\/file\/d\/([A-Za-z0-9_-]{10,})/);
+  if (m) return m[1];
+  m = s.match(/[?&]id=([A-Za-z0-9_-]{10,})/);
+  if (m) return m[1];
+  m = s.match(/\/d\/([A-Za-z0-9_-]{10,})/);
+  if (m) return m[1];
+  return '';
+}
+
+/** 이 앱이 올린 파일인지 (Photos 시트에 있거나, 우리 Drive 폴더 안에 있는지) */
+function isOurDriveFile_(fileId) {
+  try {
+    var photos = readSheetObjects_('Photos', false);
+    for (var i = 0; i < photos.length; i++) {
+      if (String(photos[i].fileId) === fileId) return true;
+      if (driveFileIdFromUrl_(photos[i].url) === fileId) return true;
+      if (driveFileIdFromUrl_(photos[i].viewUrl) === fileId) return true;
+    }
+  } catch (e) { /* 시트를 못 읽으면 아래 폴더 검사로 넘어갑니다 */ }
+
+  try {
+    var folderId = prop_('DRIVE_FOLDER_ID', '');
+    if (!folderId) return false;
+    var parents = DriveApp.getFileById(fileId).getParents();
+    while (parents.hasNext()) {
+      if (parents.next().getId() === folderId) return true;
+    }
+  } catch (e2) { /* 접근 불가 */ }
+
+  return false;
+}
+
 /* ============================================================
  * 10. 활동 로그
  * ========================================================== */
@@ -1278,7 +1364,10 @@ var AI_DEFAULT_MODELS_ = [
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash',
   'gemini-3.6-flash',
-  'gemini-2.5-flash-lite'
+  'gemini-2.5-flash-lite',
+  // ↓ 위 이름들이 아직 없을 때를 대비한 안전망 (지금 실제로 있는 이름들)
+  'gemini-2.5-flash',
+  'gemini-2.0-flash'
 ];
 
 var AI_BASE_DEFAULT_ = 'https://generativelanguage.googleapis.com/v1beta';
@@ -1383,21 +1472,65 @@ function apiAiChat_(req, ctx) {
   var useSearch = req.useSearch !== false;
   var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1400, 128), 8192);
 
+  var opts = { system: system, useSearch: useSearch, maxTokens: maxTokens };
+  var run = aiRunModels_(key, models, contents, opts);
+  if (run.fatal) return fail_('AI_KEY_ERROR', run.fatal);
+  if (run.result) return ok_(run.result, '');
+
+  // ---- 적어둔 모델 이름이 전부 "없는 모델" 이었다면 ----
+  // 구글이 이름을 바꾼 것입니다. 실제 쓸 수 있는 목록을 받아와 자동으로 다시 시도합니다.
+  if (run.sawNotFound) {
+    var avail = aiFetchModelList_(key);
+    if (avail.length) {
+      var retry = aiPickModels_(avail, models);
+      // 이미 실패한 이름은 빼고
+      var fresh = [];
+      for (var r = 0; r < retry.length; r++) {
+        if (models.indexOf(retry[r]) < 0) fresh.push(retry[r]);
+      }
+      if (fresh.length) {
+        var run2 = aiRunModels_(key, fresh, contents, opts);
+        if (run2.fatal) return fail_('AI_KEY_ERROR', run2.fatal);
+        if (run2.result) {
+          run2.result.autoPicked = true;
+          run2.result.available = avail;
+          return ok_(run2.result, '적어둔 모델 이름이 맞지 않아 ' + run2.result.model + ' 로 답했습니다.');
+        }
+        run.errors = run.errors.concat(run2.errors);
+      }
+      return fail_('AI_NO_SUCH_MODEL',
+        '적어둔 모델 이름을 하나도 찾을 수 없습니다.\n' +
+        '지금 이 키로 쓸 수 있는 모델: ' + avail.slice(0, 8).join(', ') +
+        '\n[AI 설정] → [사용 가능한 모델 불러오기] 에서 골라주세요.\n\n' +
+        run.errors.join('\n'));
+    }
+  }
+
+  return fail_('AI_FAILED',
+    '모든 모델을 시도했지만 답을 받지 못했습니다.\n' + run.errors.join('\n'));
+}
+
+/**
+ * 모델 목록을 차례로 두드려 봅니다.
+ * @returns {{result:Object|null, errors:Array, fatal:string, sawNotFound:boolean}}
+ */
+function aiRunModels_(key, models, contents, opts) {
   var base = aiBase_();
   var errors = [];
+  var sawNotFound = false;
 
   for (var mi = 0; mi < models.length; mi++) {
     var model = models[mi];
 
     // 검색 도구를 켜고 먼저 시도 → 도구를 지원하지 않으면 끄고 한 번 더
-    var tries = useSearch ? [true, false] : [false];
+    var tries = opts.useSearch ? [true, false] : [false];
 
     for (var t = 0; t < tries.length; t++) {
       var payload = {
         contents: contents,
-        generationConfig: { temperature: 0.7, maxOutputTokens: maxTokens }
+        generationConfig: { temperature: 0.7, maxOutputTokens: opts.maxTokens }
       };
-      if (system) payload.systemInstruction = { parts: [{ text: system }] };
+      if (opts.system) payload.systemInstruction = { parts: [{ text: opts.system }] };
       if (tries[t]) payload.tools = [{ google_search: {} }];
 
       var url = base + '/models/' + encodeURIComponent(model) +
@@ -1420,9 +1553,10 @@ function apiAiChat_(req, ctx) {
 
       if (code < 200 || code >= 300) {
         // 검색 도구를 지원하지 않는 모델이면 도구 없이 다시 시도
-        if (tries[t] && /tool|google_search|function/i.test(body)) continue;
+        if (tries[t] && /tool|google_search|function|Search Grounding/i.test(body)) continue;
+        if (code === 404 || /not found|NOT_FOUND|is not supported/i.test(body)) sawNotFound = true;
         var info = aiClassifyError_(code, body);
-        if (info.fatal) return fail_('AI_KEY_ERROR', info.message);
+        if (info.fatal) return { result: null, errors: errors, fatal: info.message, sawNotFound: sawNotFound };
         errors.push(model + ': ' + info.message);
         break;
       }
@@ -1440,22 +1574,83 @@ function apiAiChat_(req, ctx) {
       out = out.replace(/^\s+|\s+$/g, '');
 
       if (!out) {
-        errors.push(model + ': 빈 응답' + (cand && cand.finishReason ? ' (' + cand.finishReason + ')' : ''));
+        var why = (cand && cand.finishReason) || '';
+        // 생각하는 데 글자 수를 다 써버린 경우에는 넉넉히 늘려 한 번 더 시도합니다.
+        if (why === 'MAX_TOKENS' && !opts._retriedTokens) {
+          opts._retriedTokens = true;
+          opts.maxTokens = Math.min(opts.maxTokens * 3, 8192);
+          t--;                       // 같은 모델로 다시
+          continue;
+        }
+        errors.push(model + ': 빈 응답' + (why ? ' (' + why + ')' : ''));
         break;
       }
 
-      return ok_({
-        text: out,
-        model: model,
-        index: mi,
-        total: models.length,
-        grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
-      }, '');
+      return {
+        result: {
+          text: out,
+          model: model,
+          index: mi,
+          total: models.length,
+          grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
+        },
+        errors: errors, fatal: '', sawNotFound: sawNotFound
+      };
     }
   }
 
-  return fail_('AI_FAILED',
-    '모든 모델을 시도했지만 답을 받지 못했습니다.\n' + errors.join('\n'));
+  return { result: null, errors: errors, fatal: '', sawNotFound: sawNotFound };
+}
+
+/** 실제 쓸 수 있는 모델 이름만 받아옵니다 (실패하면 빈 배열) */
+function aiFetchModelList_(key) {
+  try {
+    var res = UrlFetchApp.fetch(
+      aiBase_() + '/models?pageSize=200&key=' + encodeURIComponent(key),
+      { method: 'get', muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return [];
+    var json = JSON.parse(res.getContentText());
+    var arr = json.models || [];
+    var list = [];
+    for (var i = 0; i < arr.length; i++) {
+      var methods = arr[i].supportedGenerationMethods || arr[i].supported_generation_methods || [];
+      if (methods.indexOf('generateContent') < 0) continue;
+      var name = String(arr[i].name || '').replace(/^models\//, '');
+      if (name) list.push(name);
+    }
+    return list;
+  } catch (e) { return []; }
+}
+
+/**
+ * 받아온 목록에서 "우리가 쓰기 좋은" 모델을 골라 순서를 정합니다.
+ * 원래 적어둔 이름과 비슷한 것(예: flash-lite)을 먼저, 실험/미리보기 판은 뒤로 보냅니다.
+ */
+function aiPickModels_(available, wanted) {
+  var wantLite = false;
+  for (var w = 0; w < wanted.length; w++) {
+    if (/lite/i.test(wanted[w])) { wantLite = true; break; }
+  }
+
+  function score(name) {
+    var s = 0;
+    if (/^gemini-/.test(name)) s += 100;
+    if (/flash/i.test(name)) s += 40;
+    if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
+    if (/pro/i.test(name)) s += 10;
+    // 버전이 높을수록 앞으로 (gemini-3.5-... > gemini-2.5-...)
+    var v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
+    if (v) s += (parseInt(v[1], 10) || 0) * 6 + (parseInt(v[2], 10) || 0);
+    // 실험판·미리보기·특수 목적은 뒤로
+    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma/i.test(name)) s -= 80;
+    if (/\d{3,}/.test(name)) s -= 15;   // 날짜가 붙은 고정 버전(-001, -20250219 등)
+    return s;
+  }
+
+  return available.slice()
+    .filter(function (n) { return /^gemini-/.test(n); })
+    .sort(function (a, b) { return score(b) - score(a); })
+    .slice(0, 5);
 }
 
 /**

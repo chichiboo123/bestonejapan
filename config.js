@@ -67,11 +67,15 @@ const AI_CONFIG = {
    *   (그렇게 고른 목록은 브라우저에 저장되어 이 기본값보다 우선합니다)
    */
   MODELS: [
+    // 요청하신 순서
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash',
     'gemini-3.6-flash',
-    'gemini-2.5-flash-lite'
+    'gemini-2.5-flash-lite',
+    // ↓ 위 이름들이 아직 없을 때를 대비한 안전망 (지금 실제로 있는 이름들)
+    'gemini-2.5-flash',
+    'gemini-2.0-flash'
   ],
 
   /** 구글 검색으로 최신 정보를 찾아 답하도록 할지 (지원하지 않는 모델이면 자동으로 꺼집니다) */

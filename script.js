@@ -1115,6 +1115,46 @@ function toEmbedUrl(url) {
   return s;
 }
 
+/** 여러 형태의 Drive 주소에서 파일 ID 만 뽑아냅니다 */
+function driveFileId(url) {
+  const s = String(url || '');
+  let m = s.match(/\/file\/d\/([A-Za-z0-9_-]{10,})/); if (m) return m[1];
+  m = s.match(/[?&]id=([A-Za-z0-9_-]{10,})/);         if (m) return m[1];
+  m = s.match(/\/d\/([A-Za-z0-9_-]{10,})/);           if (m) return m[1];
+  return '';
+}
+
+/**
+ * 같은 파일을 여러 번 열어도 다시 받지 않도록 blob 주소를 기억해 둡니다.
+ * (앱을 닫으면 자동으로 사라집니다)
+ */
+const docBlobCache = {};
+
+/**
+ * PDF 를 앱 안에서 보기 위해 파일 내용을 직접 받아옵니다.
+ *
+ * ★ 왜 이렇게 하나요?
+ *   Drive 의 미리보기 주소를 iframe 에 넣으면, Drive 가 자기 로그인 화면을
+ *   다시 iframe 으로 열려다가 Drive 스스로의 보안 규칙(frame-ancestors)에 막힙니다.
+ *   그래서 문서가 검게 나오거나 잘려 보입니다.
+ *   파일 내용만 받아와서 브라우저에 내장된 PDF 뷰어로 열면 이런 문제가 없습니다.
+ */
+async function loadDocBlobUrl(url) {
+  const fileId = driveFileId(url);
+  const key = fileId || url;
+  if (docBlobCache[key]) return docBlobCache[key];
+
+  const data = await api('getFileData', fileId ? { fileId } : { url }, { timeout: 60000, retry: 0 });
+  if (!data || !data.base64) throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
+
+  const bin = atob(data.base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: data.mimeType || 'application/pdf' }));
+  docBlobCache[key] = blobUrl;
+  return blobUrl;
+}
+
 /** 클립보드·드래그로 들어온 항목에서 이미지/PDF 파일만 추려냅니다 */
 function extractFiles(dataTransfer) {
   if (!dataTransfer) return [];
@@ -1827,17 +1867,32 @@ function openGallery(urls, label, startIndex) {
 
     if (pdf) {
       // PDF 는 새 탭으로 나가지 않고 앱 안에서 바로 봅니다.
-      const frameWrap = h('div', { class: 'viewer-doc' });
-      const frame = h('iframe', {
-        src: toEmbedUrl(url), title: (label || '문서'),
-        allow: 'fullscreen', referrerpolicy: 'no-referrer'
-      });
-      frameWrap.appendChild(frame);
+      // Drive 화면을 빌려 쓰지 않고 파일 내용을 받아와 브라우저 내장 뷰어로 엽니다.
+      const frameWrap = h('div', { class: 'viewer-doc' },
+        h('div', { class: 'viewer-doc-msg', text: '문서를 여는 중…' }));
       inner.appendChild(frameWrap);
-      // 조직 정책 등으로 iframe 이 막히는 경우를 위한 안전장치
       inner.appendChild(h('div', { class: 'viewer-tools' },
         iconBtn('open_in_new', '새 탭에서 열기', 'btn btn-sm btn-ghost',
           e => { if (e) e.stopPropagation(); openExternal(url); })));
+
+      const myIdx = idx;
+      loadDocBlobUrl(url).then(blobUrl => {
+        if (myIdx !== idx) return;          // 그 사이에 다른 장으로 넘어갔으면 무시
+        clear(frameWrap);
+        frameWrap.appendChild(h('iframe', {
+          src: blobUrl, title: (label || '문서'), allow: 'fullscreen'
+        }));
+      }).catch(err => {
+        if (myIdx !== idx) return;
+        clear(frameWrap);
+        // 서버가 예전 버전이거나 파일을 못 읽는 경우 → Drive 미리보기로 시도
+        frameWrap.appendChild(h('iframe', {
+          src: toEmbedUrl(url), title: (label || '문서'), allow: 'fullscreen'
+        }));
+        frameWrap.appendChild(h('div', { class: 'viewer-doc-note' },
+          '앱 안에서 바로 열지 못했습니다: ' + describeError(err) +
+          '\n화면이 비어 보이면 아래 [새 탭에서 열기] 를 눌러주세요.'));
+      });
     } else {
       inner.appendChild(h('img', { src: url, alt: (label || '사진') + ' ' + (idx + 1) }));
     }
@@ -4392,7 +4447,7 @@ async function aiGenerateViaServer(userText, models) {
  * [예비] 이 기기에 저장한 개인 키로 브라우저가 직접 부르기.
  * 서버에 키를 넣기 전까지 임시로 쓸 수 있습니다.
  */
-async function aiGenerateDirect(userText, models) {
+async function aiGenerateDirect(userText, models, isRetry) {
   const key = aiApiKey();
   if (!key) throw new Error('NO_KEY');
 
@@ -4405,6 +4460,7 @@ async function aiGenerateDirect(userText, models) {
   contents.push({ role: 'user', parts: [{ text: userText }] });
 
   const errors = [];
+  let sawNotFound = false;
 
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
@@ -4444,7 +4500,8 @@ async function aiGenerateDirect(userText, models) {
 
       if (!res.ok) {
         // 검색 도구를 지원하지 않는 모델이면 도구 없이 한 번 더 시도합니다.
-        if (useSearch && /tool|google_search|function/i.test(textBody)) continue;
+        if (useSearch && /tool|google_search|function|Search Grounding/i.test(textBody)) continue;
+        if (res.status === 404 || /not found|NOT_FOUND|is not supported/i.test(textBody)) sawNotFound = true;
         const info = aiParseError(res.status, textBody);
         if (info.fatal) {
           // 키 문제 등은 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
@@ -4484,9 +4541,53 @@ async function aiGenerateDirect(userText, models) {
     }
   }
 
+  // 적어둔 이름이 전부 "없는 모델" 이면, 실제 목록을 받아와 자동으로 다시 시도합니다.
+  if (sawNotFound && !isRetry) {
+    let avail = [];
+    try { avail = await aiListModels(); } catch (e) { avail = []; }
+    const fresh = aiPickModels(avail, models).filter(m => models.indexOf(m) < 0);
+    if (fresh.length) {
+      const out = await aiGenerateDirect(userText, fresh, true);
+      out.autoPicked = true;
+      lsSet(AI_KEYS.models, fresh);      // 다음부터는 바로 이 목록을 씁니다
+      return out;
+    }
+    if (avail.length) {
+      const e2 = new Error('AI_FATAL');
+      e2.detail = '적어둔 모델 이름을 하나도 찾을 수 없습니다.\n' +
+        '지금 이 키로 쓸 수 있는 모델: ' + avail.slice(0, 8).join(', ') +
+        '\n[설정] → [사용 가능한 모델 불러오기] 에서 골라주세요.';
+      throw e2;
+    }
+  }
+
   const err = new Error('AI_FAILED');
-  err.detail = errors.join('\n');
+  err.detail = errors.join('\n') || '알 수 없는 이유로 답을 받지 못했습니다.';
   throw err;
+}
+
+/**
+ * 받아온 목록에서 "우리가 쓰기 좋은" 모델을 골라 순서를 정합니다.
+ * (Code.gs 의 aiPickModels_ 와 같은 기준입니다)
+ */
+function aiPickModels(available, wanted) {
+  const wantLite = (wanted || []).some(w => /lite/i.test(w));
+  const score = name => {
+    let s = 0;
+    if (/^gemini-/.test(name)) s += 100;
+    if (/flash/i.test(name)) s += 40;
+    if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
+    if (/pro/i.test(name)) s += 10;
+    const v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
+    if (v) s += (Number(v[1]) || 0) * 6 + (Number(v[2]) || 0);
+    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma/i.test(name)) s -= 80;
+    if (/\d{3,}/.test(name)) s -= 15;
+    return s;
+  };
+  return (available || [])
+    .filter(n => /^gemini-/.test(n))
+    .sort((a, b) => score(b) - score(a))
+    .slice(0, 5);
 }
 
 /** 실제 쓸 수 있는 모델 목록을 불러옵니다 (서버 키 우선) */
@@ -4584,10 +4685,12 @@ function aiRenderMessages() {
         m.grounded ? h('span', { class: 'ai-badge', text: '검색 사용' }) : null
       ].filter(Boolean)));
     }
-    bubble.appendChild(h('div', { class: 'ai-msg-text', text: m.text }));
+    const shown = String(m.text == null ? '' : m.text).trim() || '(내용 없음)';
+    if (m.isError) bubble.classList.add('err');
+    bubble.appendChild(h('div', { class: 'ai-msg-text', text: shown }));
     if (!isUser) {
       bubble.appendChild(h('div', { class: 'ai-msg-tools' },
-        iconBtn('content_copy', '복사', 'btn btn-sm btn-ghost', () => copyText(m.text, '답변'))));
+        iconBtn('content_copy', '복사', 'btn btn-sm btn-ghost', () => copyText(shown, '답변'))));
     }
     box.appendChild(bubble);
   });
@@ -4616,9 +4719,17 @@ async function aiSend() {
 
   try {
     const out = await aiGenerate(text);
-    AIState.activeModel = out.model;
-    AIState.modelIndex = out.index;
-    AIState.messages.push({ role: 'model', text: out.text, model: out.model, grounded: out.grounded });
+    AIState.activeModel = out.model || '';
+    AIState.modelIndex = typeof out.index === 'number' ? out.index : -1;
+    AIState.messages.push({
+      role: 'model',
+      text: String(out.text || '').trim() || '(답변이 비어 있습니다. 다시 물어봐 주세요.)',
+      model: out.model || '',
+      grounded: !!out.grounded
+    });
+    if (out.autoPicked) {
+      toast('적어둔 모델 이름이 맞지 않아 ' + shortModelName(out.model) + ' 로 바꿔 답했습니다.', 'ok', 4200);
+    }
     lsSet(AI_KEYS.history, AIState.messages.slice(-40));
   } catch (err) {
     let msg;
@@ -4631,11 +4742,18 @@ async function aiSend() {
     else if (err.message === 'NO_MODEL') msg = '사용할 모델이 없습니다. [설정] 에서 모델을 골라주세요.';
     else if (err.message === 'AI_FATAL') msg = err.detail;
     else {
-      msg = '답을 받지 못했습니다. 아래 내용을 확인해 주세요.\n\n' + (err.detail || err.message) +
+      msg = '답을 받지 못했습니다. 아래 내용을 확인해 주세요.\n\n' + (err.detail || err.message || '') +
         '\n\n· 모델 이름이 맞지 않으면 [설정] → [사용 가능한 모델 불러오기] 를 눌러 골라주세요.' +
         '\n· API 키가 맞는지, 사용량이 남았는지도 확인해 주세요.';
     }
-    AIState.messages.push({ role: 'model', text: msg, model: '' });
+    // 어떤 경우에도 빈 말풍선이 뜨지 않게 합니다.
+    msg = String(msg == null ? '' : msg).trim();
+    if (!msg) {
+      msg = '답을 받지 못했는데 이유를 알 수 없습니다.\n' +
+        '오류 코드: ' + (err && (err.code || err.message) || '알 수 없음') +
+        '\n\n[설정] → [서버 상태 다시 확인] 을 눌러본 뒤 다시 시도해 주세요.';
+    }
+    AIState.messages.push({ role: 'model', text: msg, model: '', isError: true });
   } finally {
     AIState.busy = false;
     aiRenderMessages();
