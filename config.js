@@ -16,7 +16,7 @@
  * ---------------------------------------------------------------- */
 const API_CONFIG = {
   /** ↓↓↓ 이 값을 본인의 Apps Script 웹 앱 URL 로 바꿔주세요 ↓↓↓ */
-  API_URL: 'PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxB0ILgr4HzA6-DiclU9OzYduYbMPCQudzgK93p6JRdDSVB1h7hU9YsDAzDLActGLvb/exec',
 
   /** 요청 제한 시간 (밀리초). 모바일 네트워크가 느릴 수 있어 넉넉히 둡니다. */
   TIMEOUT_MS: 30000,
