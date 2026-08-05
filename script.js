@@ -371,11 +371,8 @@ function confirmBox(title, text, okLabel) {
 }
 
 function openViewer(url, isPdf) {
-  const inner = $('#viewerInner');
-  clear(inner);
-  if (isPdf) inner.appendChild(h('iframe', { src: url, title: '문서 보기' }));
-  else inner.appendChild(h('img', { src: url, alt: '크게 보기' }));
-  $('#viewer').classList.remove('hidden');
+  // 한 장짜리도 여러 장 뷰어를 그대로 씁니다 (PDF 도 앱 안에서 열립니다)
+  openGallery([url], isPdf ? '문서' : '사진', 0);
 }
 function openBigText(main, sub) {
   $('#bigTextMain').textContent = main || '';
@@ -454,6 +451,9 @@ function skeletonList(n) {
 function showLogin() {
   $('#app').classList.add('hidden');
   $('#loginScreen').classList.remove('hidden');
+  closeAiChat();
+  const fab = $('#aiFab');
+  if (fab && fab.parentNode) fab.parentNode.removeChild(fab);
   $('#loginMsg').textContent = '';
   $('#loginHelp').classList.add('hidden');
   const btn = $('#loginBtn');
@@ -463,6 +463,7 @@ function showLogin() {
 function showApp() {
   $('#loginScreen').classList.add('hidden');
   $('#app').classList.remove('hidden');
+  mountAiButton();
 }
 
 function buildUserPicker() {
@@ -967,6 +968,7 @@ function openSheet(title, bodyNodes, footNodes, opts) {
   sheetState.dirty = false;
   sheetState.open = true;
   sheetState.confirmClose = !!opts.confirmClose;
+  activeAttachField = null;   // 새 폼이 열리면 붙여넣기 대상을 초기화
   document.body.style.overflow = 'hidden';
   document.body.classList.add('sheet-open');
 }
@@ -980,6 +982,7 @@ async function closeSheet(force) {
   $('#sheetBackdrop').classList.add('hidden');
   sheetState.open = false;
   sheetState.dirty = false;
+  activeAttachField = null;
   document.body.style.overflow = '';
   document.body.classList.remove('sheet-open');
 }
@@ -1094,11 +1097,56 @@ function parseUrls(v) {
 }
 function joinUrls(list) { return (list || []).filter(Boolean).join('\n'); }
 function firstUrl(v) { return parseUrls(v)[0] || ''; }
-function isPdfUrl(url) { return /\.pdf(\?|$)/i.test(url) || String(url).indexOf('/preview') > 0; }
+function isPdfUrl(url) {
+  const s = String(url || '');
+  return /\.pdf(\?|$)/i.test(s) || s.indexOf('/preview') > 0 || /drive\.google\.com\/file\//.test(s);
+}
 
-/** 사진 필드: 여러 장 업로드 / 직접 입력 / 개별 삭제 */
+/**
+ * 앱 안에서 바로 볼 수 있는 주소로 바꿉니다.
+ * Google Drive 의 /view 링크는 iframe 에 넣으면 보이지 않으므로 /preview 로 바꿉니다.
+ */
+function toEmbedUrl(url) {
+  const s = String(url || '');
+  const m = s.match(/drive\.google\.com\/file\/d\/([^/?#]+)/);
+  if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+  return s;
+}
+
+/** 클립보드·드래그로 들어온 항목에서 이미지/PDF 파일만 추려냅니다 */
+function extractFiles(dataTransfer) {
+  if (!dataTransfer) return [];
+  const out = [];
+  const seen = {};
+  const push = file => {
+    if (!file) return;
+    const ok = /^image\//.test(file.type) || file.type === 'application/pdf';
+    if (!ok) return;
+    const key = (file.name || '') + '|' + file.size + '|' + file.type;
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push(file);
+  };
+  if (dataTransfer.files && dataTransfer.files.length) {
+    Array.prototype.slice.call(dataTransfer.files).forEach(push);
+  }
+  if (!out.length && dataTransfer.items) {
+    Array.prototype.slice.call(dataTransfer.items).forEach(it => {
+      if (it.kind === 'file') push(it.getAsFile());
+    });
+  }
+  return out;
+}
+
+/**
+ * 현재 화면에서 "붙여넣기를 받을" 첨부 필드.
+ * 폼 안 어디에서 Ctrl+V 를 눌러도 마지막으로 만진 첨부 칸으로 들어갑니다.
+ */
+let activeAttachField = null;
+
+/** 사진·파일 필드: 여러 장 업로드 / 붙여넣기 / 끌어놓기 / 직접 입력 / 개별 삭제 */
 function buildImageField(f, values, markDirty) {
-  const wrap = h('div');
+  const wrap = h('div', { class: 'attach-field', tabindex: '0' });
   const gallery = h('div', { class: 'attach-grid' });
   const progress = h('div', { class: 'upload-progress hidden' }, h('i'));
   const progressText = h('div', { class: 'hint hidden' });
@@ -1115,23 +1163,26 @@ function buildImageField(f, values, markDirty) {
     clear(gallery);
     const urls = list();
     if (!urls.length) {
-      gallery.appendChild(h('div', { class: 'photo-box', text: '아직 첨부한 파일이 없습니다. 여러 장을 한 번에 선택할 수 있습니다.' }));
+      gallery.appendChild(h('div', { class: 'photo-box' },
+        '파일을 고르거나, 여기에 끌어놓거나, Ctrl+V 로 붙여넣을 수 있습니다.'));
       return;
     }
     urls.forEach((url, i) => {
       const cell = h('div', { class: 'attach-cell' });
       if (isPdfUrl(url)) {
         cell.appendChild(h('button', {
-          type: 'button', class: 'attach-file', title: 'PDF 열기',
-          onclick: () => openExternal(url)
+          type: 'button', class: 'attach-file', title: '앱에서 열기',
+          onclick: () => openGallery(urls, f.l, i)
         }, [mi('picture_as_pdf'), h('span', { class: 'tiny', text: 'PDF' })]));
       } else {
         cell.appendChild(h('img', {
           src: url, alt: f.l + ' ' + (i + 1), loading: 'lazy',
-          onclick: () => openViewer(url, false),
+          onclick: () => openGallery(urls, f.l, i),
           onerror: function () {
-            this.replaceWith(h('div', { class: 'attach-file', title: '불러오기 실패' },
-              [mi('broken_image'), h('span', { class: 'tiny', text: '실패' })]));
+            this.replaceWith(h('button', {
+              type: 'button', class: 'attach-file', title: '앱에서 열기',
+              onclick: () => openGallery(urls, f.l, i)
+            }, [mi('broken_image'), h('span', { class: 'tiny', text: '열기' })]));
           }
         }));
       }
@@ -1144,9 +1195,9 @@ function buildImageField(f, values, markDirty) {
     });
   }
 
-  /** 고른 파일들을 하나씩 올리고, 성공한 것부터 갤러리에 추가합니다 */
-  fileInput.addEventListener('change', async () => {
-    const files = Array.prototype.slice.call(fileInput.files || []);
+  /** 파일 목록을 하나씩 올리고, 성공한 것부터 갤러리에 추가합니다 */
+  async function addFiles(files) {
+    files = (files || []).filter(Boolean);
     if (!files.length) return;
     progress.classList.remove('hidden');
     progressText.classList.remove('hidden');
@@ -1179,6 +1230,10 @@ function buildImageField(f, values, markDirty) {
       progressText.classList.add('hidden');
       bar.style.width = '0';
     }, 600);
+  }
+
+  fileInput.addEventListener('change', async () => {
+    await addFiles(Array.prototype.slice.call(fileInput.files || []));
     fileInput.value = '';
   });
 
@@ -1191,8 +1246,63 @@ function buildImageField(f, values, markDirty) {
     urlInput.value = '';
   });
 
+  /* ---------- 붙여넣기 · 끌어놓기 ---------- */
+  // 이 칸을 만지면 "붙여넣기를 받을 칸"이 됩니다.
+  const claim = () => { activeAttachField = api2; };
+  wrap.addEventListener('focusin', claim);
+  wrap.addEventListener('mousedown', claim);
+  wrap.addEventListener('touchstart', claim, { passive: true });
+
+  wrap.addEventListener('paste', e => {
+    const files = extractFiles(e.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  });
+
+  ['dragenter', 'dragover'].forEach(ev => wrap.addEventListener(ev, e => {
+    e.preventDefault();
+    wrap.classList.add('drag-over');
+  }));
+  ['dragleave', 'drop'].forEach(ev => wrap.addEventListener(ev, e => {
+    e.preventDefault();
+    if (ev === 'dragleave' && wrap.contains(e.relatedTarget)) return;
+    wrap.classList.remove('drag-over');
+  }));
+  wrap.addEventListener('drop', e => {
+    const files = extractFiles(e.dataTransfer);
+    if (files.length) addFiles(files);
+  });
+
+  /** 클립보드 읽기 권한을 써서 직접 가져오기 (지원 브라우저에서만) */
+  async function pasteFromClipboard() {
+    if (!navigator.clipboard || !navigator.clipboard.read) {
+      toast('이 브라우저는 버튼 붙여넣기를 지원하지 않습니다. 입력칸을 누르고 Ctrl+V 를 눌러주세요.', 'error', 4200);
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      const files = [];
+      for (const item of items) {
+        for (const type of item.types) {
+          if (!/^image\//.test(type) && type !== 'application/pdf') continue;
+          const blob = await item.getType(type);
+          const ext = type === 'application/pdf' ? '.pdf' : '.' + (type.split('/')[1] || 'png');
+          files.push(new File([blob], 'clipboard_' + Date.now() + ext, { type: type }));
+        }
+      }
+      if (!files.length) { toast('클립보드에 이미지나 PDF 가 없습니다.', 'error'); return; }
+      addFiles(files);
+    } catch (err) {
+      toast('클립보드를 읽지 못했습니다. 입력칸을 누르고 Ctrl+V 를 눌러주세요.', 'error', 4200);
+    }
+  }
+
+  const api2 = { addFiles: addFiles, wrap: wrap };
+
   wrap.appendChild(h('div', { class: 'row-wrap' }, [
     iconBtn('add_photo_alternate', '파일 선택 (여러 장)', 'btn btn-sm', () => fileInput.click()),
+    iconBtn('content_paste', '붙여넣기', 'btn btn-sm btn-ghost', pasteFromClipboard),
     iconBtn('collections', '올린 사진에서', 'btn btn-sm btn-ghost',
       () => pickExistingPhoto(url => setList(list().concat([url])), true))
   ]));
@@ -1202,6 +1312,7 @@ function buildImageField(f, values, markDirty) {
   wrap.appendChild(h('div', { class: 'mt8' }, urlInput));
   wrap.appendChild(h('div', { class: 'mt8' }, gallery));
   draw();
+  claim();   // 폼에 첨부 칸이 하나뿐이면 바로 붙여넣기를 받을 수 있게
   return wrap;
 }
 
@@ -1666,7 +1777,7 @@ function imgBtn(label, value) {
   if (!urls.length) return null;
   const text = urls.length > 1 ? label + ' ' + urls.length + '장' : label;
   return iconBtn(isPdfUrl(urls[0]) ? 'description' : 'image', text, 'btn btn-sm btn-star',
-    () => (urls.length > 1 ? openGallery(urls, label) : (isPdfUrl(urls[0]) ? openExternal(urls[0]) : openViewer(urls[0], false))));
+    () => openGallery(urls, label, 0));
 }
 
 /**
@@ -1679,7 +1790,7 @@ function attachGallery(value, alt) {
   urls.forEach((url, i) => {
     if (isPdfUrl(url)) {
       grid.appendChild(h('button', {
-        type: 'button', class: 'attach-cell attach-file', onclick: () => openExternal(url)
+        type: 'button', class: 'attach-cell attach-file', onclick: () => openGallery(urls, alt, i)
       }, [mi('picture_as_pdf'), h('span', { class: 'tiny', text: 'PDF' })]));
     } else {
       grid.appendChild(h('div', { class: 'attach-cell' },
@@ -1689,8 +1800,8 @@ function attachGallery(value, alt) {
           onerror: function () {
             // Drive 공유 설정 등으로 불러오지 못하면 링크 버튼으로 바꿉니다
             this.replaceWith(h('button', {
-              type: 'button', class: 'attach-file', title: '새 탭에서 열기',
-              onclick: () => openExternal(url)
+              type: 'button', class: 'attach-file', title: '앱에서 열기',
+              onclick: () => openGallery(urls, alt, i)
             }, [mi('broken_image'), h('span', { class: 'tiny', text: '열기' })]));
           }
         })
@@ -1710,8 +1821,24 @@ function openGallery(urls, label, startIndex) {
   function draw() {
     clear(inner);
     const url = list[idx];
-    if (isPdfUrl(url)) inner.appendChild(h('iframe', { src: url, title: (label || '문서') }));
-    else inner.appendChild(h('img', { src: url, alt: (label || '사진') + ' ' + (idx + 1) }));
+    const pdf = isPdfUrl(url);
+
+    if (pdf) {
+      // PDF 는 새 탭으로 나가지 않고 앱 안에서 바로 봅니다.
+      const frameWrap = h('div', { class: 'viewer-doc' });
+      const frame = h('iframe', {
+        src: toEmbedUrl(url), title: (label || '문서'),
+        allow: 'fullscreen', referrerpolicy: 'no-referrer'
+      });
+      frameWrap.appendChild(frame);
+      inner.appendChild(frameWrap);
+      // 조직 정책 등으로 iframe 이 막히는 경우를 위한 안전장치
+      inner.appendChild(h('div', { class: 'viewer-tools' },
+        iconBtn('open_in_new', '새 탭에서 열기', 'btn btn-sm btn-ghost',
+          e => { if (e) e.stopPropagation(); openExternal(url); })));
+    } else {
+      inner.appendChild(h('img', { src: url, alt: (label || '사진') + ' ' + (idx + 1) }));
+    }
 
     if (list.length > 1) {
       inner.appendChild(h('div', { class: 'viewer-nav' }, [
@@ -3485,15 +3612,18 @@ function openPhotoUpload() {
   const body = h('div');
   const dateRow = buildField({ k: 'date', l: '어느 날짜의 사진인가요?', t: 'date' }, values, {});
   body.appendChild(dateRow);
-  const fileInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
+
+  const zone = h('div', { class: 'attach-field', tabindex: '0' });
+  const fileInput = h('input', { type: 'file', accept: 'image/*,application/pdf', multiple: true, style: 'display:none' });
   const progress = h('div', { class: 'upload-progress hidden' }, h('i'));
   const result = h('div', { class: 'photo-grid mt8' });
 
-  fileInput.addEventListener('change', async () => {
-    const files = Array.prototype.slice.call(fileInput.files || []);
+  async function addFiles(files) {
+    files = (files || []).filter(Boolean);
     if (!files.length) return;
     progress.classList.remove('hidden');
     const bar = $('i', progress);
+    let ok = 0;
     for (let i = 0; i < files.length; i++) {
       bar.style.width = Math.round((i / files.length) * 100) + '%';
       try {
@@ -3502,27 +3632,66 @@ function openPhotoUpload() {
         payload.refType = 'gallery';
         const data = await api('uploadImage', payload, { timeout: 60000, retry: 0 });
         S.photos.push(data.photo);
-        result.appendChild(h('img', { src: data.photo.url, alt: '업로드한 사진' }));
+        result.appendChild(h('img', {
+          src: data.photo.url, alt: '업로드한 사진',
+          onclick: () => openGallery([data.photo.url], '사진', 0)
+        }));
+        ok++;
       } catch (err) {
         toast('업로드 실패: ' + describeError(err), 'error', 4000);
       }
     }
     bar.style.width = '100%';
-    fileInput.value = '';
     setTimeout(() => { progress.classList.add('hidden'); bar.style.width = '0'; }, 500);
-    toast('업로드가 끝났습니다.', 'ok');
+    if (ok) toast(ok + '장을 올렸습니다.', 'ok');
     silentRefresh();
+  }
+
+  fileInput.addEventListener('change', async () => {
+    await addFiles(Array.prototype.slice.call(fileInput.files || []));
+    fileInput.value = '';
   });
 
-  body.appendChild(h('button', { type: 'button', class: 'btn btn-primary btn-block', text: '사진 여러 장 선택', onclick: () => fileInput.click() }));
-  body.appendChild(fileInput);
-  body.appendChild(progress);
-  body.appendChild(result);
+  // 붙여넣기 · 끌어놓기
+  const claim = () => { activeAttachField = zoneApi; };
+  zone.addEventListener('focusin', claim);
+  zone.addEventListener('mousedown', claim);
+  zone.addEventListener('paste', e => {
+    const files = extractFiles(e.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  });
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); zone.classList.add('drag-over');
+  }));
+  ['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault();
+    if (ev === 'dragleave' && zone.contains(e.relatedTarget)) return;
+    zone.classList.remove('drag-over');
+  }));
+  zone.addEventListener('drop', e => {
+    const files = extractFiles(e.dataTransfer);
+    if (files.length) addFiles(files);
+  });
+  const zoneApi = { addFiles: addFiles, wrap: zone };
+
+  zone.appendChild(h('button', {
+    type: 'button', class: 'btn btn-primary btn-block',
+    text: '사진 여러 장 선택', onclick: () => fileInput.click()
+  }));
+  zone.appendChild(fileInput);
+  zone.appendChild(progress);
+  zone.appendChild(h('div', { class: 'photo-box mt8' },
+    '여기에 끌어놓거나 Ctrl+V 로 붙여넣어도 올라갑니다.'));
+  zone.appendChild(result);
+  body.appendChild(zone);
   body.appendChild(h('p', { class: 'faint tiny mt12', text: '사진은 긴 변 1600px 이하로 자동 압축된 뒤 Google Drive 에 저장됩니다.' }));
 
   openSheet('사진 업로드', body, [
     h('button', { class: 'btn btn-ghost', text: '닫기', onclick: () => { closeSheet(true); renderRecord(); } })
   ]);
+  claim();
 }
 
 function openPhotoDetail(p) {
@@ -3864,6 +4033,7 @@ function openMenu() {
   const items = [
     { icon: 'luggage', label: '여행 기본 정보 수정', fn: () => { closeSheet(true); openEntityForm('trip', S.trip); } },
     { icon: 'search', label: '전체 검색', fn: () => { closeSheet(true); openGlobalSearch(''); } },
+    { icon: 'auto_awesome', label: 'AI 도우미 설정 (API 키)', fn: () => { closeSheet(true); openAiSettings(); } },
     { icon: 'refresh', label: '지금 새로고침', fn: async () => { closeSheet(true); await bootstrap(true); toast('최신 자료를 불러왔습니다.', 'ok'); } },
     { icon: 'edit_note', label: '임시 저장 (' + draftCount() + ')', fn: () => openDrafts() },
     { icon: 'dark_mode', label: '밝기 테마 바꾸기', fn: () => { toggleTheme(); } },
@@ -3903,6 +4073,650 @@ function toggleTheme() {
 }
 
 /* =========================================================================
+ * 16. AI 도우미 (Google Gemini)
+ * -------------------------------------------------------------------------
+ * · 화면 어디서나 오른쪽 아래 ✨ 버튼으로 열 수 있습니다.
+ * · 앱에 저장된 여행 정보(일정·항공·숙소·예약·기록 등)를 함께 보내
+ *   "내일 몇 시에 나가야 해?" 같은 질문에 우리 데이터로 답합니다.
+ * · 앱에 없는 내용은 구글 검색을 사용해 답합니다(지원 모델일 때).
+ * · 모델은 config.js 의 AI_CONFIG.MODELS 순서대로 시도하고,
+ *   없거나(404) 사용량이 꽉 차면(429/503) 자동으로 다음 모델로 넘어갑니다.
+ *
+ * ※ API 키는 config.js 가 아니라 이 앱의 [AI 설정] 화면에서 넣습니다.
+ *   키는 그 기기의 브라우저(localStorage)에만 저장되며 서버로 보내지 않습니다.
+ * ========================================================================= */
+
+const AI = CFG.AI_CONFIG;
+
+/** AI 관련 저장 키 */
+const AI_KEYS = {
+  apiKey: 'aiApiKey',
+  models: 'aiModels',        // 사용자가 고른 모델 순서
+  lastGood: 'aiLastGood',    // 마지막으로 성공한 모델
+  history: 'aiHistory'
+};
+
+const AIState = {
+  open: false,
+  busy: false,
+  messages: [],        // { role: 'user' | 'model', text, model?, grounded? }
+  activeModel: '',     // 지금 쓰고 있는 모델
+  modelIndex: -1,      // 목록에서 몇 번째인지 (배터리 표시용)
+  available: null      // [사용 가능한 모델 목록] 불러오기 결과
+};
+
+function aiApiKey() { return lsGet(AI_KEYS.apiKey, '') || ''; }
+function aiHasKey() { return !!aiApiKey(); }
+
+/** 실제로 시도할 모델 순서 (사용자가 고른 목록이 있으면 그것을 먼저 씁니다) */
+function aiModels() {
+  const custom = lsGet(AI_KEYS.models, null);
+  const list = (Array.isArray(custom) && custom.length) ? custom : (AI.MODELS || []);
+  const lastGood = lsGet(AI_KEYS.lastGood, '');
+  if (lastGood && list.indexOf(lastGood) > 0) {
+    // 지난번에 성공한 모델을 맨 앞으로 (매번 없는 모델부터 두드리지 않도록)
+    return [lastGood].concat(list.filter(m => m !== lastGood));
+  }
+  return list.slice();
+}
+
+/* ---------- 앱 데이터를 AI 가 읽을 수 있는 요약으로 ---------- */
+
+/**
+ * 여행 정보를 짧은 글로 정리합니다.
+ * 너무 길면 요청이 느려지므로 오늘 전후 위주로 담습니다.
+ */
+function aiTripContext() {
+  if (!S.booted) return '(아직 여행 정보를 불러오지 못했습니다)';
+  const today = todayStr();
+  const lines = [];
+  const t = S.trip || {};
+
+  lines.push('# 여행 기본 정보');
+  lines.push(`여행명: ${t.tripName || '-'} / 국가: ${t.country || CO.nameKo} / 도시: ${t.city || '-'}`);
+  lines.push(`기간: ${t.startDate || '?'} ~ ${t.endDate || '?'} / 오늘(현지): ${today}`);
+  lines.push(`여행자: ${t.traveler1 || '-'}, ${t.traveler2 || '-'} / 로그인한 사람: ${S.me}`);
+
+  if (S.flights.length) {
+    lines.push('\n# 항공');
+    S.flights.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(f => {
+      lines.push(`- ${f.date} ${f.airline || ''} ${f.flightNo || ''}: ` +
+        `${f.depAirport || '?'}${f.depTerminal ? '(' + f.depTerminal + ')' : ''} ${f.depTime || ''}` +
+        `${f.boardingTime ? ' [탑승 ' + f.boardingTime + ']' : ''}` +
+        ` → ${f.arrAirport || '?'} ${f.arrTime || ''}` +
+        `${f.seat ? ' / 좌석 ' + f.seat : ''}${f.bookingNumber ? ' / 예약 ' + f.bookingNumber : ''}`);
+    });
+  }
+
+  if (S.accommodations.length) {
+    lines.push('\n# 숙소');
+    S.accommodations.forEach(a => {
+      lines.push(`- ${a.name || '-'} (${a.checkInDate || '?'} ${a.checkInTime || ''} ~ ${a.checkOutDate || '?'} ${a.checkOutTime || ''})` +
+        `${a.address ? ' / ' + a.address : ''}${a.nearestStation ? ' / 가까운 역 ' + a.nearestStation : ''}`);
+    });
+  }
+
+  // 일정은 오늘부터 앞뒤로 넉넉히
+  const dates = tripDates();
+  const idx = Math.max(dates.indexOf(today), 0);
+  const window = dates.slice(Math.max(0, idx - 1), idx + 5);
+  const sched = S.schedules
+    .filter(s => window.indexOf(s.date) >= 0)
+    .sort(sortByDateTime);
+  if (sched.length) {
+    lines.push('\n# 일정 (오늘 앞뒤)');
+    sched.forEach(s => {
+      lines.push(`- ${s.date} ${s.startTime || ''}${s.endTime ? '~' + s.endTime : ''} [${catInfo(s.category).label}] ${s.title}` +
+        `${s.place ? ' @ ' + s.place : ''}${s.departBy ? ' (출발권장 ' + s.departBy + ')' : ''}` +
+        `${truthy(s.isDone) ? ' ✔완료' : ''}`);
+    });
+  }
+
+  const res = S.reservations.filter(r => !r.date || window.indexOf(r.date) >= 0);
+  if (res.length) {
+    lines.push('\n# 예약 · 티켓');
+    res.forEach(r => {
+      lines.push(`- ${r.date || '날짜미정'} ${r.startTime || ''} ${r.title}` +
+        `${r.place ? ' @ ' + r.place : ''}${r.bookingNumber ? ' / 예약번호 ' + r.bookingNumber : ''}` +
+        `${r.meetingPoint ? ' / 집합 ' + r.meetingPoint : ''}`);
+    });
+  }
+
+  if (S.routes.length) {
+    lines.push('\n# 저장한 이동 경로');
+    S.routes.slice(0, 8).forEach(r => {
+      lines.push(`- ${r.name}${r.totalMinutes ? ' (약 ' + r.totalMinutes + '분)' : ''}${r.caution ? ' / 주의: ' + r.caution : ''}`);
+    });
+  }
+
+  const recentRecords = S.dailyRecords
+    .slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 6);
+  if (recentRecords.length) {
+    lines.push('\n# 최근 기록');
+    recentRecords.forEach(r => {
+      lines.push(`- ${r.date} (${r.author || '?'}) ${r.oneLine || r.bestMoment || ''}`.trim());
+    });
+  }
+
+  if (S.expenses.length) {
+    const sum = {};
+    S.expenses.forEach(e => {
+      const c = e.currency || CO.currency;
+      sum[c] = (sum[c] || 0) + (Number(e.amount) || 0);
+    });
+    lines.push('\n# 지출 합계: ' + Object.keys(sum).map(c => c + ' ' + sum[c].toLocaleString()).join(', '));
+  }
+
+  let text = lines.join('\n');
+  if (text.length > 6000) text = text.slice(0, 6000) + '\n…(생략)';
+  return text;
+}
+
+function aiSystemPrompt() {
+  return [
+    '너는 "BestOne in Japan" 여행 앱에 들어 있는 AI 도우미다.',
+    '두 사람이 함께 쓰는 개인 여행 앱이며, 사용자는 한국인 여행자다.',
+    '',
+    '규칙:',
+    '- 반드시 한국어로, 친근하고 간결하게 답한다.',
+    '- 아래 <여행자료> 에 답이 있으면 그 내용을 최우선으로 근거 삼아 답한다.',
+    '- <여행자료> 에 없는 것(맛집 추천, 날씨, 영업시간, 최신 정보 등)은 아는 대로 답하되,',
+    '  확실하지 않으면 "확실하지 않다"고 분명히 말하고 확인 방법을 알려준다.',
+    '- 시각 계산이 필요하면 <여행자료> 의 날짜·시각을 사용한다. 현지(일본) 시간 기준이다.',
+    '- 답은 보통 3~6문장. 목록이 도움이 되면 짧은 목록을 쓴다. 표는 쓰지 않는다.',
+    '- 앱 사용법을 물으면: 일정/예약/기록은 각 탭의 + 버튼으로 추가하고,',
+    '  현지 탭에서 회화·어휘·노선 길찾기를 쓸 수 있다고 안내한다.',
+    '',
+    '<여행자료>',
+    aiTripContext(),
+    '</여행자료>'
+  ].join('\n');
+}
+
+/* ---------- Gemini 호출 ---------- */
+
+/**
+ * Gemini 오류 응답을 해석합니다.
+ * @returns {{fatal:boolean, message:string}}
+ *   fatal 이면 다음 모델을 시도해도 소용없으므로 즉시 멈춥니다.
+ *   (예: API 키가 잘못된 경우 - 이때도 HTTP 400 이 오기 때문에 구분이 필요합니다)
+ */
+function aiParseError(status, bodyText) {
+  let reason = '', message = '', gstatus = '';
+  try {
+    const e = (JSON.parse(bodyText) || {}).error || {};
+    message = e.message || '';
+    gstatus = e.status || '';
+    (e.details || []).forEach(d => { if (d.reason) reason = d.reason; });
+  } catch (err) { message = String(bodyText || '').slice(0, 200); }
+
+  if (reason === 'API_KEY_INVALID' || /api key not valid/i.test(message)) {
+    return { fatal: true, message: 'API 키가 올바르지 않습니다. [설정] 에서 키를 다시 확인해 주세요.' };
+  }
+  if (status === 403 || gstatus === 'PERMISSION_DENIED') {
+    return {
+      fatal: true,
+      message: 'API 키에 권한이 없습니다.\n' +
+        '· AI Studio 에서 키가 활성 상태인지\n' +
+        '· 키에 걸어둔 웹사이트 제한(HTTP 리퍼러)에 이 앱 주소가 들어 있는지 확인해 주세요.'
+    };
+  }
+  if (status === 401 || gstatus === 'UNAUTHENTICATED') {
+    return { fatal: true, message: '인증에 실패했습니다. API 키를 다시 넣어주세요.' };
+  }
+  // 그 외(모델 없음 404, 사용량 초과 429, 일시 오류 500/503 등)는 다음 모델로 넘어갑니다.
+  return { fatal: false, message: message || ('HTTP ' + status) };
+}
+
+/**
+ * 모델 목록을 순서대로 시도해 답을 받아옵니다.
+ * @returns {{text:string, model:string, index:number, grounded:boolean}}
+ */
+async function aiGenerate(userText) {
+  const key = aiApiKey();
+  if (!key) throw new Error('NO_KEY');
+
+  const models = aiModels();
+  if (!models.length) throw new Error('NO_MODEL');
+
+  // 최근 대화 (system 은 따로 보냄)
+  const turns = AIState.messages.slice(-(AI.HISTORY_TURNS * 2));
+  const contents = turns.map(m => ({
+    role: m.role === 'user' ? 'user' : 'model',
+    parts: [{ text: m.text }]
+  }));
+  contents.push({ role: 'user', parts: [{ text: userText }] });
+
+  const errors = [];
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+
+    // 검색 도구를 켠 채로 먼저 시도하고, 거부당하면 도구 없이 한 번 더 시도합니다.
+    for (const useSearch of (AI.USE_SEARCH ? [true, false] : [false])) {
+      const body = {
+        systemInstruction: { parts: [{ text: aiSystemPrompt() }] },
+        contents: contents,
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: AI.MAX_OUTPUT_TOKENS
+        }
+      };
+      if (useSearch) body.tools = [{ google_search: {} }];
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), AI.TIMEOUT_MS);
+      let res, textBody;
+      try {
+        res = await fetch(
+          `${AI.API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+          }
+        );
+        textBody = await res.text();
+      } catch (err) {
+        clearTimeout(timer);
+        errors.push(`${model}: ${err && err.name === 'AbortError' ? '시간 초과' : '연결 실패'}`);
+        break;   // 네트워크 문제면 도구만 바꿔봐야 소용없으니 다음 모델로
+      }
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        // 검색 도구를 지원하지 않는 모델이면 도구 없이 한 번 더 시도합니다.
+        if (useSearch && /tool|google_search|function/i.test(textBody)) continue;
+        const info = aiParseError(res.status, textBody);
+        if (info.fatal) {
+          // 키 문제 등은 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
+          const fatal = new Error('AI_FATAL');
+          fatal.detail = info.message;
+          throw fatal;
+        }
+        errors.push(`${model}: ${info.message}`);
+        break;
+      }
+
+      let json;
+      try { json = JSON.parse(textBody); } catch (e) {
+        errors.push(`${model}: 응답 해석 실패`);
+        break;
+      }
+
+      const cand = json.candidates && json.candidates[0];
+      const parts = cand && cand.content && cand.content.parts;
+      const text = (parts || []).map(p => p.text || '').join('').trim();
+
+      if (!text) {
+        const reason = cand && cand.finishReason ? ` (${cand.finishReason})` : '';
+        errors.push(`${model}: 빈 응답${reason}`);
+        break;
+      }
+
+      lsSet(AI_KEYS.lastGood, model);
+      return {
+        text: text,
+        model: model,
+        index: i,
+        total: models.length,
+        grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
+      };
+    }
+  }
+
+  const err = new Error('AI_FAILED');
+  err.detail = errors.join('\n');
+  throw err;
+}
+
+/** 내 API 키로 실제 쓸 수 있는 모델 목록을 불러옵니다 */
+async function aiListModels() {
+  const key = aiApiKey();
+  if (!key) throw new Error('NO_KEY');
+  const res = await fetch(`${AI.API_BASE}/models?key=${encodeURIComponent(key)}&pageSize=200`);
+  const text = await res.text();
+  if (!res.ok) {
+    const e = new Error('LIST_FAILED');
+    e.detail = 'HTTP ' + res.status + ' ' + text.slice(0, 300);
+    throw e;
+  }
+  const json = JSON.parse(text);
+  return (json.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0)
+    .map(m => String(m.name || '').replace(/^models\//, ''))
+    .filter(Boolean);
+}
+
+/* ---------- 화면 ---------- */
+
+/** 지금 쓰는 모델을 배터리처럼 보여주는 표시 */
+function aiModelGauge() {
+  const models = aiModels();
+  const total = models.length || 1;
+  const idx = AIState.modelIndex;
+  const wrap = h('div', {
+    class: 'ai-gauge',
+    title: idx >= 0
+      ? `지금 모델: ${AIState.activeModel} (${idx + 1}번째 / 전체 ${total}개)`
+      : '아직 사용한 모델이 없습니다'
+  });
+
+  const bars = h('div', { class: 'ai-gauge-bars', 'aria-hidden': 'true' });
+  for (let i = 0; i < total; i++) {
+    // 앞쪽(1순위)일수록 초록, 뒤로 갈수록 주황
+    let cls = 'ai-bar';
+    if (idx >= 0 && i <= idx) cls += idx === 0 ? ' full' : (idx < total - 1 ? ' mid' : ' low');
+    bars.appendChild(h('span', { class: cls }));
+  }
+  wrap.appendChild(bars);
+  wrap.appendChild(h('span', {
+    class: 'ai-gauge-label',
+    text: AIState.activeModel ? shortModelName(AIState.activeModel) : '대기 중'
+  }));
+  return wrap;
+}
+
+function shortModelName(m) {
+  return String(m).replace(/^models\//, '').replace(/^gemini-/, '');
+}
+
+function aiRenderMessages() {
+  const box = $('#aiMessages');
+  if (!box) return;
+  clear(box);
+
+  if (!AIState.messages.length) {
+    box.appendChild(h('div', { class: 'ai-empty' }, [
+      mi('auto_awesome', 'mi-lg'),
+      h('p', { class: 'ai-empty-title', text: '무엇이든 물어보세요' }),
+      h('p', { class: 'ai-empty-desc', text: '우리 여행 자료를 보고 답해드립니다.' }),
+      h('div', { class: 'ai-suggest' }, [
+        '오늘 몇 시에 나가야 해?',
+        '내일 일정 정리해줘',
+        '숙소 근처 저녁 먹을 곳 추천해줘',
+        '공항 갈 때 뭐 타면 돼?'
+      ].map(q => h('button', {
+        class: 'btn btn-sm btn-ghost', text: q,
+        onclick: () => { $('#aiInput').value = q; aiSend(); }
+      })))
+    ]));
+    return;
+  }
+
+  AIState.messages.forEach(m => {
+    const isUser = m.role === 'user';
+    const bubble = h('div', { class: 'ai-msg ' + (isUser ? 'me' : 'bot') });
+    if (!isUser) {
+      bubble.appendChild(h('div', { class: 'ai-msg-head' }, [
+        mi('auto_awesome', 'mi-sm'),
+        h('span', { text: m.model ? shortModelName(m.model) : 'AI' }),
+        m.grounded ? h('span', { class: 'ai-badge', text: '검색 사용' }) : null
+      ].filter(Boolean)));
+    }
+    bubble.appendChild(h('div', { class: 'ai-msg-text', text: m.text }));
+    if (!isUser) {
+      bubble.appendChild(h('div', { class: 'ai-msg-tools' },
+        iconBtn('content_copy', '복사', 'btn btn-sm btn-ghost', () => copyText(m.text, '답변'))));
+    }
+    box.appendChild(bubble);
+  });
+
+  if (AIState.busy) {
+    box.appendChild(h('div', { class: 'ai-msg bot' },
+      h('div', { class: 'ai-typing' }, [h('i'), h('i'), h('i')])));
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+async function aiSend() {
+  const input = $('#aiInput');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text || AIState.busy) return;
+
+  if (!aiHasKey()) { openAiSettings(); return; }
+
+  input.value = '';
+  input.style.height = 'auto';
+  AIState.messages.push({ role: 'user', text: text });
+  AIState.busy = true;
+  aiRenderMessages();
+  aiUpdateGauge();
+
+  try {
+    const out = await aiGenerate(text);
+    AIState.activeModel = out.model;
+    AIState.modelIndex = out.index;
+    AIState.messages.push({ role: 'model', text: out.text, model: out.model, grounded: out.grounded });
+    lsSet(AI_KEYS.history, AIState.messages.slice(-40));
+  } catch (err) {
+    let msg;
+    if (err.message === 'NO_KEY') msg = 'API 키가 없습니다. 위 [설정] 에서 키를 넣어주세요.';
+    else if (err.message === 'NO_MODEL') msg = '사용할 모델이 없습니다. [설정] 에서 모델을 골라주세요.';
+    else if (err.message === 'AI_FATAL') msg = err.detail;
+    else {
+      msg = '답을 받지 못했습니다. 아래 내용을 확인해 주세요.\n\n' + (err.detail || err.message) +
+        '\n\n· 모델 이름이 맞지 않으면 [설정] → [사용 가능한 모델 불러오기] 를 눌러 골라주세요.' +
+        '\n· API 키가 맞는지, 사용량이 남았는지도 확인해 주세요.';
+    }
+    AIState.messages.push({ role: 'model', text: msg, model: '' });
+  } finally {
+    AIState.busy = false;
+    aiRenderMessages();
+    aiUpdateGauge();
+  }
+}
+
+function aiUpdateGauge() {
+  const holder = $('#aiGauge');
+  if (holder) mount(holder, aiModelGauge());
+}
+
+function openAiChat() {
+  if (AIState.open) return;
+  AIState.open = true;
+  if (!AIState.messages.length) AIState.messages = lsGet(AI_KEYS.history, []) || [];
+
+  const panel = h('div', { class: 'ai-panel', role: 'dialog', 'aria-label': 'AI 도우미' });
+
+  panel.appendChild(h('div', { class: 'ai-head' }, [
+    h('div', { class: 'ai-title' }, [
+      mi('auto_awesome'),
+      h('span', { text: 'AI 도우미' })
+    ]),
+    h('div', { id: 'aiGauge' }, aiModelGauge()),
+    h('div', { class: 'ai-head-actions' }, [
+      h('button', { class: 'icon-btn', 'aria-label': 'AI 설정', title: 'AI 설정', onclick: openAiSettings }, mi('settings')),
+      h('button', {
+        class: 'icon-btn', 'aria-label': '대화 지우기', title: '대화 지우기',
+        onclick: async () => {
+          const yes = await confirmBox('대화 지우기', '지금까지의 대화를 모두 지울까요?', '지우기');
+          if (!yes) return;
+          AIState.messages = [];
+          lsDel(AI_KEYS.history);
+          aiRenderMessages();
+        }
+      }, mi('delete_sweep')),
+      h('button', { class: 'icon-btn', 'aria-label': '닫기', onclick: closeAiChat }, mi('close'))
+    ])
+  ]));
+
+  panel.appendChild(h('div', { class: 'ai-messages', id: 'aiMessages' }));
+
+  const input = h('textarea', {
+    id: 'aiInput', rows: 1, placeholder: '여행에 대해 무엇이든 물어보세요',
+    'aria-label': 'AI 에게 보낼 내용'
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiSend(); }
+  });
+
+  panel.appendChild(h('div', { class: 'ai-input-row' }, [
+    input,
+    h('button', { class: 'ai-send', 'aria-label': '보내기', onclick: aiSend }, mi('send'))
+  ]));
+
+  const back = h('div', { class: 'ai-backdrop', id: 'aiBackdrop' }, panel);
+  back.addEventListener('click', e => { if (e.target === back) closeAiChat(); });
+  document.body.appendChild(back);
+
+  aiRenderMessages();
+  if (!aiHasKey()) setTimeout(openAiSettings, 250);
+  else setTimeout(() => input.focus(), 120);
+}
+
+function closeAiChat() {
+  const back = $('#aiBackdrop');
+  if (back && back.parentNode) back.parentNode.removeChild(back);
+  AIState.open = false;
+}
+
+/** API 키 · 모델 설정 화면 */
+function openAiSettings() {
+  const box = h('div', {
+    class: 'confirm-box ai-settings', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'AI 설정',
+    style: 'max-width:560px;width:100%;max-height:86vh;overflow-y:auto'
+  });
+  const back = h('div', { class: 'confirm-backdrop', style: 'z-index:120' }, box);
+  const close = () => { if (back.parentNode) back.parentNode.removeChild(back); };
+  back.addEventListener('click', e => { if (e.target === back) close(); });
+
+  box.appendChild(h('h3', { text: 'AI 도우미 설정' }));
+
+  /* --- API 키 --- */
+  box.appendChild(h('div', { class: 'form-group-title', text: 'Gemini API 키' }));
+  const keyInput = h('input', { type: 'password', placeholder: 'AIza... 로 시작하는 키', 'aria-label': 'Gemini API 키' });
+  keyInput.value = aiApiKey();
+  const keyRow = h('div', { class: 'row', style: 'gap:6px' }, [
+    h('div', { style: 'flex:1' }, keyInput),
+    h('button', {
+      class: 'icon-btn', 'aria-label': '키 보기',
+      onclick: () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; }
+    }, mi('visibility'))
+  ]);
+  box.appendChild(keyRow);
+  box.appendChild(h('p', { class: 'hint' },
+    '키는 이 기기의 브라우저에만 저장되고, 우리 서버(Apps Script)나 GitHub 에는 올라가지 않습니다.'));
+
+  box.appendChild(h('div', { class: 'row-wrap mt8' }, [
+    iconBtn('open_in_new', 'AI Studio 에서 키 만들기', 'btn btn-sm btn-ghost',
+      () => openExternal('https://aistudio.google.com/apikey')),
+    iconBtn('save', '키 저장', 'btn btn-sm btn-primary', () => {
+      const v = keyInput.value.trim();
+      if (!v) { lsDel(AI_KEYS.apiKey); toast('키를 지웠습니다.', 'ok'); return; }
+      lsSet(AI_KEYS.apiKey, v);
+      toast('API 키를 저장했습니다.', 'ok');
+    })
+  ]));
+
+  /* --- 모델 --- */
+  box.appendChild(h('div', { class: 'form-group-title', text: '모델 순서' }));
+  box.appendChild(h('p', { class: 'hint' },
+    '위에 있는 모델부터 사용합니다. 없거나 사용량이 꽉 차면 자동으로 아래 모델로 넘어갑니다.'));
+
+  const listBox = h('div', { class: 'ai-model-list' });
+  function drawModels() {
+    clear(listBox);
+    const models = (lsGet(AI_KEYS.models, null) || AI.MODELS || []).slice();
+    models.forEach((m, i) => {
+      listBox.appendChild(h('div', { class: 'ai-model-row' }, [
+        h('span', { class: 'ai-model-no', text: String(i + 1) }),
+        h('span', { style: 'flex:1;min-width:0', text: m }),
+        h('button', {
+          class: 'icon-btn', 'aria-label': '위로', title: '위로',
+          onclick: () => {
+            if (i === 0) return;
+            const t = models[i - 1]; models[i - 1] = models[i]; models[i] = t;
+            lsSet(AI_KEYS.models, models); lsDel(AI_KEYS.lastGood); drawModels();
+          }
+        }, mi('arrow_upward', 'mi-sm')),
+        h('button', {
+          class: 'icon-btn', 'aria-label': '빼기', title: '빼기',
+          onclick: () => {
+            models.splice(i, 1);
+            lsSet(AI_KEYS.models, models); lsDel(AI_KEYS.lastGood); drawModels();
+          }
+        }, mi('close', 'mi-sm'))
+      ]));
+    });
+    if (!models.length) {
+      listBox.appendChild(h('p', { class: 'faint tiny', text: '모델이 없습니다. 아래에서 불러와 추가해 주세요.' }));
+    }
+  }
+  drawModels();
+  box.appendChild(listBox);
+
+  const availBox = h('div', { class: 'mt8' });
+  box.appendChild(h('div', { class: 'row-wrap mt8' }, [
+    iconBtn('cloud_download', '사용 가능한 모델 불러오기', 'btn btn-sm', async e => {
+      const btn = e && e.currentTarget;
+      if (btn) { btn.disabled = true; }
+      clear(availBox);
+      availBox.appendChild(h('p', { class: 'faint tiny', text: '불러오는 중…' }));
+      try {
+        const list = await aiListModels();
+        AIState.available = list;
+        clear(availBox);
+        if (!list.length) {
+          availBox.appendChild(h('p', { class: 'faint tiny', text: '쓸 수 있는 모델이 없습니다.' }));
+        } else {
+          availBox.appendChild(h('p', { class: 'hint', text: '누르면 목록 맨 아래에 추가됩니다. (' + list.length + '개)' }));
+          const chips = h('div', { class: 'chips', style: 'flex-wrap:wrap' });
+          list.forEach(m => chips.appendChild(h('button', {
+            class: 'chip', text: m,
+            onclick: () => {
+              const cur = (lsGet(AI_KEYS.models, null) || AI.MODELS || []).slice();
+              if (cur.indexOf(m) >= 0) { toast('이미 목록에 있습니다.', 'error'); return; }
+              cur.push(m);
+              lsSet(AI_KEYS.models, cur); lsDel(AI_KEYS.lastGood);
+              drawModels();
+              toast(m + ' 을(를) 추가했습니다.', 'ok');
+            }
+          })));
+          availBox.appendChild(chips);
+        }
+      } catch (err) {
+        clear(availBox);
+        availBox.appendChild(h('p', { class: 'login-help', style: 'display:block' },
+          err.message === 'NO_KEY'
+            ? '먼저 API 키를 저장해 주세요.'
+            : '모델 목록을 불러오지 못했습니다.\n' + (err.detail || err.message)));
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }),
+    iconBtn('restart_alt', '기본값으로', 'btn btn-sm btn-ghost', () => {
+      lsDel(AI_KEYS.models); lsDel(AI_KEYS.lastGood);
+      drawModels();
+      toast('config.js 의 기본 순서로 되돌렸습니다.', 'ok');
+    })
+  ]));
+  box.appendChild(availBox);
+
+  box.appendChild(h('div', { class: 'confirm-actions' }, [
+    h('button', { class: 'btn btn-primary', text: '닫기', onclick: () => { close(); aiUpdateGauge(); } })
+  ]));
+
+  document.body.appendChild(back);
+}
+
+/** 화면 어디서나 보이는 AI 버튼 */
+function mountAiButton() {
+  if ($('#aiFab')) return;
+  const btn = h('button', {
+    id: 'aiFab', class: 'ai-fab', 'aria-label': 'AI 도우미 열기', title: 'AI 도우미',
+    onclick: openAiChat
+  }, mi('auto_awesome', 'mi-lg'));
+  document.body.appendChild(btn);
+}
+
+/* =========================================================================
  * 15. 시작
  * ========================================================================= */
 
@@ -3926,6 +4740,16 @@ function bindGlobalEvents() {
   $('#bigTextClose').addEventListener('click', () => $('#bigText').classList.add('hidden'));
   $('#bigText').addEventListener('click', e => { if (e.target === $('#bigText')) $('#bigText').classList.add('hidden'); });
 
+  // 폼 안 어디에서 Ctrl+V 를 눌러도 첨부 칸으로 이미지·PDF 가 들어가게 합니다.
+  // (글자를 붙여넣을 때는 파일이 없으므로 그대로 통과시킵니다)
+  document.addEventListener('paste', e => {
+    if (!activeAttachField) return;
+    const files = extractFiles(e.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    activeAttachField.addFiles(files);
+  });
+
   // Ctrl/Cmd + K 로 전체 검색 열기
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
@@ -3937,6 +4761,7 @@ function bindGlobalEvents() {
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     if (!$('#viewer').classList.contains('hidden')) { $('#viewer').classList.add('hidden'); return; }
+    if (AIState.open) { closeAiChat(); return; }
     if (!$('#bigText').classList.contains('hidden')) { $('#bigText').classList.add('hidden'); return; }
     if (sheetState.open) closeSheet(false);
   });

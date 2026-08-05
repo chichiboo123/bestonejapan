@@ -42,13 +42,45 @@ var COMMON_TAIL = ['createdBy', 'createdAt', 'updatedBy', 'updatedAt', 'isDelete
  *   2) 그래도 이미 Date 로 저장되어 있던 값은 읽을 때(formatDateTimeCell_)
  *      필드 종류에 맞춰 올바른 형태(날짜만 또는 시각만)로 복원합니다.
  */
-var DATE_ONLY_FIELDS_ = { date: 1, checkInDate: 1, checkOutDate: 1 };
-var TIME_ONLY_FIELDS_ = {
-  startTime: 1, endTime: 1, depTime: 1, arrTime: 1, boardingTime: 1,
-  checkInTime: 1, checkOutTime: 1, departBy: 1
+/** 날짜만 담는 칸 (yyyy-MM-dd) */
+var DATE_ONLY_FIELDS_ = {
+  date: 1, checkInDate: 1, checkOutDate: 1,
+  startDate: 1, endDate: 1            // 여행 기본 정보(Settings 시트)
 };
 
-/** Date 객체를 필드 종류에 맞는 문자열로 되돌립니다. Date 가 아니면 그대로 돌려줍니다. */
+/** 시각만 담는 칸 (HH:mm) */
+var TIME_ONLY_FIELDS_ = {
+  startTime: 1, endTime: 1, depTime: 1, arrTime: 1, boardingTime: 1,
+  checkInTime: 1, checkOutTime: 1, departBy: 1,
+  firstBus: 1, lastBus: 1             // 사용자가 "05:40" 처럼 적을 수 있는 칸
+};
+
+/**
+ * 전체 시각(ISO 타임스탬프)을 담는 칸.
+ * 값 형식은 기본값과 같지만, 자동 변환되면 updatedAt 비교가 어긋나
+ * 저장할 때마다 "다른 사람이 먼저 수정했습니다" 오류가 나므로 함께 보호합니다.
+ */
+var TIMESTAMP_FIELDS_ = {
+  createdAt: 1, updatedAt: 1, at: 1, issuedAt: 1, expiresAt: 1, lastSeenAt: 1
+};
+
+/**
+ * 시트별로 추가 보호가 필요한 칸.
+ * Settings 시트는 key/value 구조라서 startDate 같은 날짜가 'value' 칸에 들어갑니다.
+ */
+var EXTRA_TEXT_COLUMNS_ = { Settings: { value: 1 } };
+
+/** 이 칸을 "일반 텍스트" 서식으로 고정해야 하는가? */
+function isProtectedColumn_(sheetName, header) {
+  if (DATE_ONLY_FIELDS_[header] || TIME_ONLY_FIELDS_[header] || TIMESTAMP_FIELDS_[header]) return true;
+  var extra = EXTRA_TEXT_COLUMNS_[sheetName];
+  return !!(extra && extra[header]);
+}
+
+/**
+ * Date 객체를 필드 종류에 맞는 문자열로 되돌립니다. Date 가 아니면 그대로 돌려줍니다.
+ * @param {string} header 칸 이름. Settings 시트의 'value' 칸은 그 행의 key 를 넘겨줍니다.
+ */
 function formatDateTimeCell_(header, v) {
   if (!(v instanceof Date)) return v;
   if (DATE_ONLY_FIELDS_[header]) return Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM-dd');
@@ -57,15 +89,16 @@ function formatDateTimeCell_(header, v) {
 }
 
 /**
- * 날짜·시각 전용 컬럼에 "일반 텍스트" 서식을 강제해 자동 변환을 막습니다.
+ * 날짜·시각 칸에 "일반 텍스트" 서식을 강제해 자동 변환을 막습니다.
  * @param {Sheet} sh 대상 시트
+ * @param {string} sheetName 시트 이름
  * @param {string[]} headers 전체 헤더 배열
- * @param {number[]} [onlyCols] 1부터 시작하는 컬럼 번호만 처리하고 싶을 때 (없으면 전체)
+ * @param {number[]} [onlyCols] 1부터 시작하는 칸 번호만 처리하고 싶을 때 (없으면 전체)
  */
-function protectDateTimeColumns_(sh, headers, onlyCols) {
+function protectDateTimeColumns_(sh, sheetName, headers, onlyCols) {
   var maxRows = Math.max(sh.getMaxRows() - 1, 1);
   headers.forEach(function (h, idx) {
-    if (!DATE_ONLY_FIELDS_[h] && !TIME_ONLY_FIELDS_[h]) return;
+    if (!isProtectedColumn_(sheetName, h)) return;
     var col = idx + 1;
     if (onlyCols && onlyCols.indexOf(col) === -1) return;
     try {
@@ -410,7 +443,7 @@ function getSheet_(name) {
     sh.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]);
     sh.setFrozenRows(1);
     sh.getRange(1, 1, 1, SCHEMA[name].length).setFontWeight('bold').setBackground('#f0ece1');
-    protectDateTimeColumns_(sh, SCHEMA[name]);
+    protectDateTimeColumns_(sh, name, SCHEMA[name]);
   }
   return sh;
 }
@@ -420,7 +453,7 @@ function headersOf_(sh, name) {
   var lastCol = sh.getLastColumn();
   if (lastCol < 1) {
     sh.getRange(1, 1, 1, SCHEMA[name].length).setValues([SCHEMA[name]]);
-    protectDateTimeColumns_(sh, SCHEMA[name]);
+    protectDateTimeColumns_(sh, name, SCHEMA[name]);
     return SCHEMA[name].slice();
   }
   var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h || ''); });
@@ -434,7 +467,7 @@ function headersOf_(sh, name) {
     var newCols = [];
     for (var i = 0; i < missing.length; i++) newCols.push(headers.length + 1 + i);
     headers = headers.concat(missing);
-    protectDateTimeColumns_(sh, headers, newCols);
+    protectDateTimeColumns_(sh, name, headers, newCols);
   }
   return headers;
 }
@@ -452,14 +485,20 @@ function readSheetObjects_(name, skipDeleted) {
   var values = sh.getRange(1, 1, lastRow, lastCol).getValues();
   var headers = values[0].map(function (h) { return String(h || ''); });
   var out = [];
+  var keyCol = headers.indexOf('key');   // Settings 시트용
   for (var r = 1; r < values.length; r++) {
     var row = values[r];
     var isEmpty = true;
     var obj = {};
+    // Settings 시트는 key/value 구조라서 'value' 칸의 형식이 같은 행의 key 에 따라 달라집니다.
+    var rowKey = (name === 'Settings' && keyCol >= 0) ? String(row[keyCol] || '') : '';
     for (var c = 0; c < headers.length; c++) {
       if (!headers[c]) continue;
       var v = row[c];
-      if (v instanceof Date) v = formatDateTimeCell_(headers[c], v);
+      if (v instanceof Date) {
+        var hint = (rowKey && headers[c] === 'value') ? rowKey : headers[c];
+        v = formatDateTimeCell_(hint, v);
+      }
       if (v !== '' && v !== null && v !== undefined) isEmpty = false;
       obj[headers[c]] = normalizeCell_(v);
     }
@@ -1420,21 +1459,30 @@ function repairDateTimeColumns_(ss) {
 
     var targetCols = [];
     headers.forEach(function (h, idx) {
-      if (DATE_ONLY_FIELDS_[h] || TIME_ONLY_FIELDS_[h]) targetCols.push({ header: h, col: idx + 1 });
+      if (isProtectedColumn_(name, h)) targetCols.push({ header: h, col: idx + 1 });
     });
     if (!targetCols.length) return;
+
+    // Settings 시트는 'value' 칸의 형식이 같은 행의 key 에 따라 달라집니다.
+    var keyCol = headers.indexOf('key');
+    var rowKeys = [];
+    if (name === 'Settings' && keyCol >= 0) {
+      rowKeys = sh.getRange(2, keyCol + 1, lastRow - 1, 1).getValues()
+        .map(function (r) { return String(r[0] || ''); });
+    }
 
     var fixedCount = 0;
     targetCols.forEach(function (t) {
       var range = sh.getRange(2, t.col, lastRow - 1, 1);
       var values = range.getValues();
       var changed = false;
-      var out = values.map(function (row) {
+      var out = values.map(function (row, i) {
         var v = row[0];
         if (v instanceof Date) {
           changed = true;
           fixedCount++;
-          return [formatDateTimeCell_(t.header, v)];
+          var hint = (t.header === 'value' && rowKeys[i]) ? rowKeys[i] : t.header;
+          return [formatDateTimeCell_(hint, v)];
         }
         return [v];
       });
