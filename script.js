@@ -10,6 +10,15 @@ const PFX   = API.STORAGE_PREFIX;
 const TZ    = CO.timezone;
 const TZ_OFFSET_HOURS = 9; // Asia/Tokyo (일광절약시간 없음)
 
+/** 주요 메뉴 정의 (모바일 하단 탭바 + PC 사이드바가 이 정의를 함께 씁니다) */
+const TABS = [
+  { key: 'today',    label: '오늘', icon: 'wb_sunny' },
+  { key: 'schedule', label: '일정', icon: 'calendar_month' },
+  { key: 'booking',  label: '예약', icon: 'confirmation_number' },
+  { key: 'local',    label: '현지', icon: 'travel_explore' },
+  { key: 'record',   label: '기록', icon: 'auto_stories' }
+];
+
 /* ---------- 앱 상태 ---------- */
 const S = {
   token: null,
@@ -20,8 +29,7 @@ const S = {
   dailyRecords: [], sharedRecords: [], japanesePhrases: [], japaneseWords: [],
   stations: [], buses: [], routes: [], expenses: [], photos: [],
   tab: 'today',
-  scheduleDate: null,
-  recordDate: null,
+  date: null,          // 일정 · 기록 · 사진 · 지출이 공유하는 '선택된 날짜'
   bookingTab: 'flight',
   localTab: 'phrase',
   recordTab: 'day',
@@ -69,6 +77,22 @@ function h(tag, props, children) {
     });
   return el;
 }
+/** Google Material Symbols 아이콘 (ligature 방식) */
+function mi(name, extraClass) {
+  return h('span', {
+    class: 'mi' + (extraClass ? ' ' + extraClass : ''),
+    'aria-hidden': 'true',
+    text: name
+  });
+}
+
+/** 아이콘 + 글자 버튼 */
+function iconBtn(icon, label, cls, onclick) {
+  return h('button', {
+    type: 'button', class: cls || 'btn btn-sm', onclick: onclick, 'aria-label': label
+  }, [mi(icon, 'mi-sm'), h('span', { text: label })]);
+}
+
 function clear(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
 function mount(el, nodes) {
   clear(el);
@@ -179,7 +203,7 @@ function cap(s) { return String(s).charAt(0).toUpperCase() + String(s).slice(1);
 function truthy(v) { return v === true || v === 'true' || v === 'TRUE' || v === 1 || v === '1'; }
 function catInfo(key) {
   return CFG.CATEGORIES.filter(c => c.key === key)[0] ||
-    { key: key || 'etc', label: key || '기타', emoji: '📌', color: '#8b8377' };
+    { key: key || 'etc', label: key || '기타', icon: 'push_pin', color: '#8b8377' };
 }
 function memberInfo(nickname) {
   const m = S.members.filter(x => x.nickname === nickname)[0];
@@ -403,9 +427,9 @@ function mapsSearchUrl(query) {
 }
 
 /* 빈 화면 / 스켈레톤 */
-function emptyBox(title, desc, art) {
+function emptyBox(title, desc, icon) {
   return h('div', { class: 'empty' }, [
-    h('div', { class: 'e-art', text: art || '🌙' }),
+    h('div', { class: 'e-art' }, mi(icon || 'bedtime')),
     h('div', { class: 'e-title', text: title }),
     h('div', { class: 'e-desc', text: desc || '' })
   ]);
@@ -669,11 +693,8 @@ function renderLoadError(err) {
 function ensureDefaultDates() {
   const today = todayStr();
   const dates = tripDates();
-  if (!S.scheduleDate) {
-    S.scheduleDate = dates.indexOf(today) >= 0 ? today : (dates[0] || today);
-  }
-  if (!S.recordDate) {
-    S.recordDate = dates.indexOf(today) >= 0 ? today : (dates[dates.length - 1] || today);
+  if (!S.date || dates.indexOf(S.date) < 0) {
+    S.date = dates.indexOf(today) >= 0 ? today : (dates[0] || today);
   }
 }
 
@@ -1115,80 +1136,126 @@ function buildField(f, values, ctx) {
   return row;
 }
 
-/** 사진 필드: 업로드 / 직접 입력 / 삭제 */
+/* ---------- 첨부 여러 장 다루기 ----------
+ * 사진·파일 필드는 URL 을 줄바꿈으로 구분해 여러 개 저장합니다.
+ * (시트 구조를 바꾸지 않고 한 칸에 여러 장을 담기 위한 방식이며,
+ *  기존에 저장된 단일 URL 도 그대로 읽힙니다)
+ */
+function parseUrls(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.filter(Boolean);
+  return String(v).split(/[\r\n]+/).map(x => x.trim()).filter(Boolean);
+}
+function joinUrls(list) { return (list || []).filter(Boolean).join('\n'); }
+function firstUrl(v) { return parseUrls(v)[0] || ''; }
+function isPdfUrl(url) { return /\.pdf(\?|$)/i.test(url) || String(url).indexOf('/preview') > 0; }
+
+/** 사진 필드: 여러 장 업로드 / 직접 입력 / 개별 삭제 */
 function buildImageField(f, values, markDirty) {
   const wrap = h('div');
-  const preview = h('div');
+  const gallery = h('div', { class: 'attach-grid' });
   const progress = h('div', { class: 'upload-progress hidden' }, h('i'));
-  const urlInput = h('input', { type: 'url', placeholder: '이미지 주소 직접 입력 (https://...)' });
-  urlInput.value = values[f.k] || '';
-  urlInput.addEventListener('input', () => { values[f.k] = urlInput.value; markDirty(); drawPreview(); });
+  const progressText = h('div', { class: 'hint hidden' });
 
+  const urlInput = h('input', { type: 'url', placeholder: '주소를 직접 붙여넣고 Enter (https://...)' });
   const fileInput = h('input', {
-    type: 'file', accept: 'image/*,application/pdf', style: 'display:none'
+    type: 'file', accept: 'image/*,application/pdf', multiple: true, style: 'display:none'
   });
 
-  function drawPreview() {
-    clear(preview);
-    const url = values[f.k];
-    if (!url) {
-      preview.appendChild(h('div', { class: 'photo-box', text: '아직 사진이 없습니다.' }));
+  const list = () => parseUrls(values[f.k]);
+  const setList = arr => { values[f.k] = joinUrls(arr); markDirty(); draw(); };
+
+  function draw() {
+    clear(gallery);
+    const urls = list();
+    if (!urls.length) {
+      gallery.appendChild(h('div', { class: 'photo-box', text: '아직 첨부한 파일이 없습니다. 여러 장을 한 번에 선택할 수 있습니다.' }));
       return;
     }
-    const isPdf = /\.pdf(\?|$)/i.test(url) || url.indexOf('/preview') > 0;
-    if (isPdf) {
-      preview.appendChild(h('button', {
-        type: 'button', class: 'btn btn-sm', text: '📄 파일 열기', onclick: () => openExternal(url)
-      }));
-    } else {
-      preview.appendChild(h('img', {
-        class: 'preview-thumb', src: url, alt: f.l + ' 미리보기',
-        onerror: function () { this.replaceWith(h('div', { class: 'photo-box', text: '이미지를 불러오지 못했습니다. 주소를 확인해 주세요.' })); }
-      }));
-    }
-    preview.appendChild(h('button', {
-      type: 'button', class: 'btn btn-sm btn-ghost mt8', text: '사진 지우기',
-      onclick: () => { values[f.k] = ''; urlInput.value = ''; markDirty(); drawPreview(); }
-    }));
+    urls.forEach((url, i) => {
+      const cell = h('div', { class: 'attach-cell' });
+      if (isPdfUrl(url)) {
+        cell.appendChild(h('button', {
+          type: 'button', class: 'attach-file', title: 'PDF 열기',
+          onclick: () => openExternal(url)
+        }, [mi('picture_as_pdf'), h('span', { class: 'tiny', text: 'PDF' })]));
+      } else {
+        cell.appendChild(h('img', {
+          src: url, alt: f.l + ' ' + (i + 1), loading: 'lazy',
+          onclick: () => openViewer(url, false),
+          onerror: function () {
+            this.replaceWith(h('div', { class: 'attach-file', title: '불러오기 실패' },
+              [mi('broken_image'), h('span', { class: 'tiny', text: '실패' })]));
+          }
+        }));
+      }
+      cell.appendChild(h('button', {
+        type: 'button', class: 'attach-del', 'aria-label': (i + 1) + '번째 첨부 삭제',
+        onclick: () => { const a = list(); a.splice(i, 1); setList(a); }
+      }, mi('close', 'mi-sm')));
+      if (urls.length > 1) cell.appendChild(h('span', { class: 'attach-no', text: String(i + 1) }));
+      gallery.appendChild(cell);
+    });
   }
 
+  /** 고른 파일들을 하나씩 올리고, 성공한 것부터 갤러리에 추가합니다 */
   fileInput.addEventListener('change', async () => {
-    const file = fileInput.files && fileInput.files[0];
-    if (!file) return;
+    const files = Array.prototype.slice.call(fileInput.files || []);
+    if (!files.length) return;
     progress.classList.remove('hidden');
+    progressText.classList.remove('hidden');
     const bar = $('i', progress);
-    bar.style.width = '10%';
-    try {
-      const payload = await prepareUpload(file, p => { bar.style.width = Math.round(10 + p * 70) + '%'; });
-      bar.style.width = '85%';
-      const data = await api('uploadImage', payload, { timeout: 60000, retry: 0 });
-      bar.style.width = '100%';
-      values[f.k] = data.photo.url;
-      urlInput.value = data.photo.url;
-      S.photos.push(data.photo);
-      markDirty();
-      drawPreview();
-      toast('사진이 업로드되었습니다.', 'ok');
-    } catch (err) {
-      toast('업로드 실패: ' + describeError(err), 'error', 4200);
-    } finally {
-      setTimeout(() => { progress.classList.add('hidden'); bar.style.width = '0'; }, 500);
-      fileInput.value = '';
+    let ok = 0, fail = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      progressText.textContent = '올리는 중… (' + (i + 1) + ' / ' + files.length + ')';
+      const base = i / files.length;
+      try {
+        const payload = await prepareUpload(files[i], pr => {
+          bar.style.width = Math.round((base + pr * 0.7 / files.length) * 100) + '%';
+        });
+        payload.refType = f.k;
+        payload.date = values.date || '';
+        const data = await api('uploadImage', payload, { timeout: 60000, retry: 0 });
+        S.photos.push(data.photo);
+        setList(list().concat([data.photo.url]));
+        ok++;
+      } catch (err) {
+        fail++;
+        toast((files[i].name || '파일') + ' 업로드 실패: ' + describeError(err), 'error', 4200);
+      }
+      bar.style.width = Math.round(((i + 1) / files.length) * 100) + '%';
     }
+
+    if (ok) toast(ok + '개를 올렸습니다.' + (fail ? ' (' + fail + '개 실패)' : ''), fail ? 'error' : 'ok');
+    setTimeout(() => {
+      progress.classList.add('hidden');
+      progressText.classList.add('hidden');
+      bar.style.width = '0';
+    }, 600);
+    fileInput.value = '';
+  });
+
+  urlInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const v = urlInput.value.trim();
+    if (!/^https?:\/\//i.test(v)) { toast('http 로 시작하는 주소를 넣어주세요.', 'error'); return; }
+    setList(list().concat([v]));
+    urlInput.value = '';
   });
 
   wrap.appendChild(h('div', { class: 'row-wrap' }, [
-    h('button', { type: 'button', class: 'btn btn-sm', text: '📷 사진 선택', onclick: () => fileInput.click() }),
-    h('button', {
-      type: 'button', class: 'btn btn-sm btn-ghost', text: '기존 사진에서 고르기',
-      onclick: () => pickExistingPhoto(url => { values[f.k] = url; urlInput.value = url; markDirty(); drawPreview(); })
-    })
+    iconBtn('add_photo_alternate', '파일 선택 (여러 장)', 'btn btn-sm', () => fileInput.click()),
+    iconBtn('collections', '올린 사진에서', 'btn btn-sm btn-ghost',
+      () => pickExistingPhoto(url => setList(list().concat([url])), true))
   ]));
   wrap.appendChild(fileInput);
   wrap.appendChild(progress);
+  wrap.appendChild(progressText);
   wrap.appendChild(h('div', { class: 'mt8' }, urlInput));
-  wrap.appendChild(h('div', { class: 'mt8' }, preview));
-  drawPreview();
+  wrap.appendChild(h('div', { class: 'mt8' }, gallery));
+  draw();
   return wrap;
 }
 
@@ -1196,7 +1263,7 @@ function buildImageField(f, values, markDirty) {
  * 이미 올린 사진 중에서 고르기.
  * 작성 중인 폼(바텀시트)을 덮어쓰지 않도록 별도의 겹침창으로 띄웁니다.
  */
-function pickExistingPhoto(onPick) {
+function pickExistingPhoto(onPick, keepOpen) {
   const photos = S.photos.slice().reverse();
   if (!photos.length) { toast('저장된 사진이 없습니다.', 'error'); return; }
 
@@ -1219,7 +1286,12 @@ function pickExistingPhoto(onPick) {
   photos.forEach(p => {
     grid.appendChild(h('img', {
       src: p.url, alt: p.name || '사진', loading: 'lazy',
-      onclick: () => { onPick(p.url); close(); }
+      // keepOpen 이면 창을 닫지 않아 여러 장을 이어서 고를 수 있습니다
+      onclick: e => {
+        onPick(p.url);
+        if (keepOpen) { e.currentTarget.classList.add('picked'); toast('추가했습니다.', 'ok', 1000); }
+        else close();
+      }
     }));
   });
   document.body.appendChild(back);
@@ -1281,7 +1353,7 @@ function buildStepsField(f, values, markDirty) {
   const wrap = h('div');
   wrap.appendChild(list);
   wrap.appendChild(h('button', {
-    type: 'button', class: 'btn btn-sm mt8', text: '＋ 단계 추가',
+    type: 'button', class: 'btn btn-sm mt8', text: '단계 추가',
     onclick: () => { steps.push({ type: 'train', line: '', from: '', to: '', platform: '', minutes: '', cost: '', note: '' }); sync(); draw(); }
   }));
   return wrap;
@@ -1470,7 +1542,7 @@ function openDrafts() {
   const drafts = lsGet(draftKey(), []);
   const body = h('div');
   if (!drafts.length) {
-    body.appendChild(emptyBox('임시 저장된 내용이 없습니다', '저장에 실패한 내용이 있으면 여기에 보관됩니다.', '📝'));
+    body.appendChild(emptyBox('임시 저장된 내용이 없습니다', '저장에 실패한 내용이 있으면 여기에 보관됩니다.', 'edit_note'));
   } else {
     body.appendChild(h('p', { class: 'faint mb8', text: '인터넷이 연결되면 [다시 저장]을 눌러 주세요.' }));
     drafts.forEach(d => {
@@ -1622,7 +1694,8 @@ function authorBadge(rec) {
 
 function catBadge(key) {
   const c = catInfo(key);
-  return h('span', { class: 'badge badge-cat', style: 'background:' + c.color, text: c.emoji + ' ' + c.label });
+  return h('span', { class: 'badge badge-cat', style: 'background:' + c.color },
+    [mi(c.icon, 'mi-sm'), h('span', { text: c.label })]);
 }
 
 function sampleBadge(rec) {
@@ -1640,15 +1713,70 @@ function copyBtn(label, value) {
 function mapBtn(rec, queryFields) {
   const url = rec.mapUrl || (queryFields ? mapsSearchUrl(queryFields) : '');
   if (!url) return null;
-  return h('button', { class: 'btn btn-sm', text: '🗺️ 지도', onclick: () => openExternal(url) });
+  return iconBtn('map', '지도', 'btn btn-sm', () => openExternal(url));
 }
-function imgBtn(label, url) {
-  if (!url) return null;
-  const isPdf = /\.pdf(\?|$)/i.test(url) || url.indexOf('/preview') > 0;
-  return h('button', {
-    class: 'btn btn-sm btn-star', text: label,
-    onclick: () => (isPdf ? openExternal(url) : openViewer(url, false))
+function imgBtn(label, value) {
+  const urls = parseUrls(value);
+  if (!urls.length) return null;
+  const text = urls.length > 1 ? label + ' ' + urls.length + '장' : label;
+  return iconBtn(isPdfUrl(urls[0]) ? 'description' : 'image', text, 'btn btn-sm btn-star',
+    () => (urls.length > 1 ? openGallery(urls, label) : (isPdfUrl(urls[0]) ? openExternal(urls[0]) : openViewer(urls[0], false))));
+}
+
+/**
+ * 첨부 여러 장을 격자로 보여줍니다. (없으면 null)
+ */
+function attachGallery(value, alt) {
+  const urls = parseUrls(value);
+  if (!urls.length) return null;
+  const grid = h('div', { class: 'attach-grid view-only' });
+  urls.forEach((url, i) => {
+    if (isPdfUrl(url)) {
+      grid.appendChild(h('button', {
+        type: 'button', class: 'attach-cell attach-file', onclick: () => openExternal(url)
+      }, [mi('picture_as_pdf'), h('span', { class: 'tiny', text: 'PDF' })]));
+    } else {
+      grid.appendChild(h('div', { class: 'attach-cell' },
+        h('img', {
+          src: url, alt: (alt || '첨부') + ' ' + (i + 1), loading: 'lazy',
+          onclick: () => openGallery(urls, alt, i),
+          onerror: function () {
+            // Drive 공유 설정 등으로 불러오지 못하면 링크 버튼으로 바꿉니다
+            this.replaceWith(h('button', {
+              type: 'button', class: 'attach-file', title: '새 탭에서 열기',
+              onclick: () => openExternal(url)
+            }, [mi('broken_image'), h('span', { class: 'tiny', text: '열기' })]));
+          }
+        })
+      ));
+    }
   });
+  return grid;
+}
+
+/** 여러 장을 좌우로 넘겨보는 전체 화면 뷰어 */
+function openGallery(urls, label, startIndex) {
+  const list = parseUrls(urls);
+  if (!list.length) return;
+  let idx = Math.min(Math.max(startIndex || 0, 0), list.length - 1);
+  const inner = $('#viewerInner');
+
+  function draw() {
+    clear(inner);
+    const url = list[idx];
+    if (isPdfUrl(url)) inner.appendChild(h('iframe', { src: url, title: (label || '문서') }));
+    else inner.appendChild(h('img', { src: url, alt: (label || '사진') + ' ' + (idx + 1) }));
+
+    if (list.length > 1) {
+      inner.appendChild(h('div', { class: 'viewer-nav' }, [
+        h('button', { class: 'icon-btn', 'aria-label': '이전', onclick: e => { e.stopPropagation(); idx = (idx - 1 + list.length) % list.length; draw(); } }, mi('chevron_left')),
+        h('span', { class: 'viewer-count', text: (idx + 1) + ' / ' + list.length }),
+        h('button', { class: 'icon-btn', 'aria-label': '다음', onclick: e => { e.stopPropagation(); idx = (idx + 1) % list.length; draw(); } }, mi('chevron_right'))
+      ]));
+    }
+  }
+  draw();
+  $('#viewer').classList.remove('hidden');
 }
 
 /* =========================================================================
@@ -1743,8 +1871,8 @@ function renderToday() {
         ]),
         h('div', { class: 'countdown', text: fmtRelative(remain) })
       ]),
-      departBy ? h('div', { class: 'depart-hint', text: '🚶 출발 권장 시각 ' + departBy + (it.transport ? ' · ' + it.transport : '') + (it.travelMinutes ? ' (' + it.travelMinutes + '분 소요)' : '') }) : null,
-      it.prepare ? h('div', { class: 'depart-hint', text: '🎒 준비물 ' + it.prepare }) : null
+      departBy ? h('div', { class: 'depart-hint', text: '출발 권장 시각 ' + departBy + (it.transport ? ' · ' + it.transport : '') + (it.travelMinutes ? ' (' + it.travelMinutes + '분 소요)' : '') }) : null,
+      it.prepare ? h('div', { class: 'depart-hint', text: '준비물 ' + it.prepare }) : null
     ]));
   }
 
@@ -1752,12 +1880,12 @@ function renderToday() {
   const todays = todaySchedules(date);
   nodes.push(h('div', { class: 'section-head' }, [
     h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '오늘의 일정']),
-    h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('schedule', null, { date: date }) })
+    iconBtn('add', '추가', 'btn btn-sm', () => openEntityForm('schedule', null, { date: date }))
   ]));
   if (todays.length) {
     nodes.push(renderTimeline(todays));
   } else {
-    nodes.push(emptyBox('오늘 등록된 일정이 없습니다', '자유롭게 걷는 날도 좋아요. 필요하면 일정을 추가해 보세요.', '🌤️'));
+    nodes.push(emptyBox('오늘 등록된 일정이 없습니다', '자유롭게 걷는 날도 좋아요. 필요하면 일정을 추가해 보세요.', 'wb_sunny'));
   }
 
   /* ---- 오늘 사용할 예약 / 티켓 ---- */
@@ -1796,35 +1924,30 @@ function renderToday() {
     showPhrases.forEach(p => nodes.push(phraseCard(p)));
   }
 
-  /* ---- 오늘의 기록 ---- */
-  nodes.push(h('div', { class: 'section-head' }, h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '오늘의 기록'])));
-  const myRec = S.dailyRecords.filter(r => r.date === date && r.author === S.me)[0];
-  const partnerRecs = S.dailyRecords.filter(r => r.date === date && r.author !== S.me);
-  const recCard = h('div', { class: 'card' }, [
+  /* ---- 오늘의 기록 (두 사람 기록을 한 줄기로) ---- */
+  const todayRecords = dayRecords(date);
+  const myRec = todayRecords.filter(r => r._kind === 'daily' && r._author === S.me)[0];
+  nodes.push(h('div', { class: 'section-head' }, [
+    h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '오늘의 기록']),
+    todayRecords.length
+      ? h('button', { class: 'btn btn-sm btn-ghost', text: '모두 보기', onclick: () => { S.date = date; switchTab('record'); } })
+      : null
+  ].filter(Boolean)));
+
+  nodes.push(h('div', { class: 'card' },
     h('button', {
       class: 'btn btn-primary btn-block',
-      text: myRec ? '✍️ 오늘의 기록 이어 쓰기' : '✍️ 오늘의 기록 작성하기',
-      onclick: () => openEntityForm('dailyRecord', myRec || null, { date: date, author: S.me })
-    }),
-    myRec && myRec.oneLine ? h('div', { class: 'record-oneline', text: '“' + myRec.oneLine + '”' }) : null
-  ]);
-  nodes.push(recCard);
+      text: myRec ? '오늘의 기록 이어 쓰기' : '오늘의 기록 작성하기',
+      onclick: () => { S.date = date; switchTab('record'); openRecordForm(date, myRec); }
+    })
+  ));
 
-  if (partnerRecs.length) {
-    partnerRecs.forEach(r => {
-      const m = memberInfo(r.author);
-      nodes.push(h('div', { class: 'card card-tight' }, [
-        h('div', { class: 'record-who', text: m.emoji + ' ' + (r.author || '') + '님의 오늘 기록' }),
-        r.oneLine ? h('div', { class: 'record-oneline', text: '“' + r.oneLine + '”' }) : null,
-        r.bestMoment ? h('p', { class: 'muted mt8', style: 'font-size:.9rem;white-space:pre-wrap', text: r.bestMoment.substring(0, 120) + (r.bestMoment.length > 120 ? '…' : '') }) : null,
-        h('button', {
-          class: 'btn btn-sm btn-ghost mt8', text: '기록 전체 보기',
-          onclick: () => { S.recordDate = date; switchTab('record'); }
-        })
-      ]));
-    });
+  if (todayRecords.length) {
+    const feed = h('div', { class: 'record-feed' });
+    todayRecords.forEach(r => feed.appendChild(recordCard(r)));
+    nodes.push(feed);
   } else {
-    nodes.push(h('p', { class: 'faint', style: 'text-align:center;padding:6px 0 2px', text: '파트너는 아직 오늘의 기록을 남기지 않았습니다.' }));
+    nodes.push(h('p', { class: 'faint', style: 'text-align:center;padding:6px 0 2px', text: '아직 오늘의 기록이 없습니다. 먼저 한 줄 남겨보세요.' }));
   }
 
   /* ---- 긴급 연락처 ---- */
@@ -1875,8 +1998,8 @@ function scheduleItem(it) {
   card.appendChild(h('div', { class: 'row' }, [
     h('div', { style: 'flex:1;min-width:0' }, [
       h('div', { class: 'tl-time', text: timeText || '시간 미정' }),
-      h('div', { class: 'tl-title', text: (must ? '⭐ ' : '') + (it.title || '') }),
-      it.place ? h('div', { class: 'tl-place', text: '📍 ' + it.place }) : null
+      h('div', { class: 'tl-title' }, [must ? mi('star', 'filled mi-sm') : null, h('span', { text: it.title || '' })].filter(Boolean)),
+      it.place ? h('div', { class: 'tl-place', text: it.place }) : null
     ])
   ]));
 
@@ -1884,9 +2007,9 @@ function scheduleItem(it) {
 
   const meta = h('div', { class: 'tl-meta' }, [
     catBadge(it.category),
-    it.transport ? h('span', { class: 'badge', text: '🚶 ' + it.transport + (it.travelMinutes ? ' ' + it.travelMinutes + '분' : '') }) : null,
+    it.transport ? h('span', { class: 'badge', text: it.transport + (it.travelMinutes ? ' ' + it.travelMinutes + '분' : '') }) : null,
     it.departBy ? h('span', { class: 'badge', text: '출발 ' + it.departBy }) : null,
-    it.prepare ? h('span', { class: 'badge', text: '🎒 ' + it.prepare }) : null,
+    it.prepare ? h('span', { class: 'badge', text: it.prepare }) : null,
     sampleBadge(it),
     it._virtual ? h('span', { class: 'badge', text: '항공 정보에서 자동 표시' }) : authorBadge(it)
   ].filter(Boolean));
@@ -1901,22 +2024,20 @@ function scheduleItem(it) {
   } else {
     actions.appendChild(h('button', {
       class: 'btn btn-sm' + (done ? ' btn-ghost' : ''),
-      text: done ? '↩︎ 완료 취소' : '✓ 완료',
+      text: done ? '완료 취소' : '완료',
       onclick: () => toggleScheduleField(it, 'isDone')
     }));
     actions.appendChild(h('button', {
       class: 'btn btn-sm btn-ghost',
-      text: must ? '⭐ 꼭 가기 해제' : '☆ 꼭 가기',
+      text: must ? '꼭 가기 해제' : '꼭 가기',
       onclick: () => toggleScheduleField(it, 'mustGo')
     }));
     const mb = mapBtn(it, it.place || it.title);
     if (mb) actions.appendChild(mb);
     if (it.reservationId) {
       const res = byId(S.reservations, it.reservationId);
-      if (res) actions.appendChild(h('button', {
-        class: 'btn btn-sm btn-ghost', text: '🎟️ 예약 보기',
-        onclick: () => openReservationDetail(res)
-      }));
+      if (res) actions.appendChild(iconBtn('confirmation_number', '예약 보기', 'btn btn-sm btn-ghost',
+        () => openReservationDetail(res)));
     }
     actions.appendChild(h('button', {
       class: 'btn btn-sm btn-ghost', text: '수정',
@@ -2015,7 +2136,7 @@ function renderSchedule() {
   const view = $('#view-schedule');
   if (S.loading && !S.booted) { mount(view, skeletonList(4)); return; }
   ensureDefaultDates();
-  const date = S.scheduleDate;
+  const date = S.date;
   const nodes = [];
 
   nodes.push(searchBox('일정 검색 (제목 · 장소 · 설명)', S.filters.scheduleQ, v => { S.filters.scheduleQ = v; renderSchedule(); }));
@@ -2042,23 +2163,23 @@ function renderSchedule() {
       });
       nodes.push(wrap);
     } else {
-      nodes.push(emptyBox('검색 결과가 없습니다', '다른 낱말로 찾아보세요.', '🔍'));
+      nodes.push(emptyBox('검색 결과가 없습니다', '다른 낱말로 찾아보세요.', 'search'));
     }
     mount(view, nodes.filter(Boolean));
-    view.appendChild(h('button', { class: 'fab', 'aria-label': '일정 추가', text: '＋', onclick: () => openEntityForm('schedule', null, { date: date }) }));
+    view.appendChild(h('button', { class: 'fab', 'aria-label': '일정 추가', onclick: () => openEntityForm('schedule', null, { date: date }) }, mi('add', 'mi-lg')));
     return;
   }
 
-  nodes.push(renderDateStrip(date, d => { S.scheduleDate = d; renderSchedule(); }));
+  nodes.push(renderDateStrip(date, d => { S.date = d; renderSchedule(); }));
 
   nodes.push(h('div', { class: 'section-head' }, [
     h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), fmtDateFull(date)]),
-    h('button', { class: 'btn btn-sm', text: '＋ 일정 추가', onclick: () => openEntityForm('schedule', null, { date: date }) })
+    iconBtn('add', '일정 추가', 'btn btn-sm', () => openEntityForm('schedule', null, { date: date }))
   ]));
 
   const items = todaySchedules(date);
   if (items.length) nodes.push(renderTimeline(items));
-  else nodes.push(emptyBox('이 날의 일정이 없습니다', '아래 ＋ 버튼으로 첫 일정을 추가해 보세요.', '🗓️'));
+  else nodes.push(emptyBox('이 날의 일정이 없습니다', '아래 + 버튼으로 첫 일정을 추가해 보세요.', 'calendar_month'));
 
   /* 숙소 안내 */
   const stay = S.accommodations.filter(a => a.checkInDate <= date && date <= (a.checkOutDate || a.checkInDate));
@@ -2083,10 +2204,7 @@ function renderSchedule() {
           h('button', { class: 'btn btn-sm btn-ghost', text: '자세히', onclick: () => openReservationDetail(r) }),
           linked
             ? h('span', { class: 'badge', text: '일정에 추가됨' })
-            : h('button', {
-              class: 'btn btn-sm btn-primary', text: '＋ 일정에 추가',
-              onclick: () => addReservationToSchedule(r)
-            })
+            : iconBtn('add', '일정에 추가', 'btn btn-sm btn-primary', () => addReservationToSchedule(r))
         ])
       ]));
     });
@@ -2094,7 +2212,7 @@ function renderSchedule() {
 
   mount(view, nodes.filter(Boolean));
 
-  const fab = h('button', { class: 'fab', 'aria-label': '일정 추가', text: '＋', onclick: () => openEntityForm('schedule', null, { date: date }) });
+  const fab = h('button', { class: 'fab', 'aria-label': '일정 추가', onclick: () => openEntityForm('schedule', null, { date: date }) }, mi('add', 'mi-lg'));
   view.appendChild(fab);
 }
 
@@ -2122,7 +2240,7 @@ async function addReservationToSchedule(res) {
 function flightCard(f) {
   return h('div', { class: 'list-item' }, [
     h('div', { class: 'li-head' }, [
-      h('div', { class: 'li-title', text: '✈️ ' + (f.airline || '') + ' ' + (f.flightNo || '') }),
+      h('div', { class: 'li-title', text: (f.airline || '') + ' ' + (f.flightNo || '') }),
       sampleBadge(f)
     ].filter(Boolean)),
     h('div', { class: 'li-sub', text: fmtDateKo(f.date, true) }),
@@ -2135,7 +2253,7 @@ function flightCard(f) {
       kv('메모', f.memo)
     ].filter(Boolean)),
     h('div', { class: 'li-actions' }, [
-      imgBtn('🎫 탑승권 보기', f.ticketUrl),
+      imgBtn('탑승권 보기', f.ticketUrl),
       linkBtn('예약 사이트', f.bookingSite),
       h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('flight', f) })
     ].filter(Boolean)),
@@ -2146,7 +2264,7 @@ function flightCard(f) {
 function accommodationCard(a, compact) {
   const nodes = [
     h('div', { class: 'li-head' }, [
-      h('div', { class: 'li-title', text: '🛏️ ' + (a.name || '') }),
+      h('div', { class: 'li-title', text: (a.name || '') }),
       sampleBadge(a)
     ].filter(Boolean)),
     h('div', { class: 'li-sub', text: (a.checkInDate ? fmtDateKo(a.checkInDate) + ' ' + (a.checkInTime || '') : '') + ' → ' + (a.checkOutDate ? fmtDateKo(a.checkOutDate) + ' ' + (a.checkOutTime || '') : '') })
@@ -2175,10 +2293,8 @@ function accommodationCard(a, compact) {
 
   nodes.push(h('div', { class: 'li-actions' }, [
     mapBtn(a, a.nameJa || a.addressJa || a.name),
-    a.addressJa ? h('button', {
-      class: 'btn btn-sm btn-star', text: '🚕 택시 기사에게 보여주기',
-      onclick: () => openBigText(a.addressJa, (a.nameJa || a.name || '') + '\nまで お願いします')
-    }) : null,
+    a.addressJa ? iconBtn('local_taxi', '택시 기사에게 보여주기', 'btn btn-sm btn-star',
+      () => openBigText(a.addressJa, (a.nameJa || a.name || '') + '\nまで お願いします')) : null,
     a.addressJa ? h('button', {
       class: 'btn btn-sm btn-ghost', text: '일본어 주소 크게 보기',
       onclick: () => openBigText(a.addressJa, a.nameJa || a.name || '')
@@ -2209,8 +2325,8 @@ function reservationCard(r, compact) {
       kv('준비물', r.prepare)
     ].filter(Boolean)),
     h('div', { class: 'li-actions' }, [
-      r.qrImageUrl ? h('button', { class: 'btn btn-sm btn-star', text: '📱 QR 크게 보기', onclick: () => openViewer(r.qrImageUrl, false) }) : null,
-      imgBtn('🎫 티켓', r.ticketUrl),
+      parseUrls(r.qrImageUrl).length ? iconBtn('qr_code_2', 'QR 크게 보기', 'btn btn-sm btn-star', () => openGallery(r.qrImageUrl, 'QR 코드')) : null,
+      imgBtn('티켓', r.ticketUrl),
       mapBtn(r, r.place || r.title),
       h('button', { class: 'btn btn-sm btn-ghost', text: '자세히', onclick: () => openReservationDetail(r) })
     ].filter(Boolean))
@@ -2224,12 +2340,7 @@ function openReservationDetail(r) {
     h('span', { class: 'badge', text: typeLabel }), sampleBadge(r), authorBadge(r)
   ].filter(Boolean)));
 
-  if (r.qrImageUrl) {
-    body.appendChild(h('img', {
-      src: r.qrImageUrl, alt: 'QR 코드', class: 'preview-thumb',
-      style: 'max-height:220px;cursor:pointer', onclick: () => openViewer(r.qrImageUrl, false)
-    }));
-  }
+  { const g = attachGallery(r.qrImageUrl, 'QR 코드'); if (g) body.appendChild(g); }
   [
     ['날짜', r.date ? fmtDateFull(r.date) : ''],
     ['시간', (r.startTime || '') + (r.endTime ? ' – ' + r.endTime : '')],
@@ -2240,7 +2351,7 @@ function openReservationDetail(r) {
     .forEach(p => { const n = kv(p[0], p[1]); if (n) body.appendChild(n); });
 
   body.appendChild(h('div', { class: 'li-actions mt12' }, [
-    imgBtn('🎫 티켓 크게 보기', r.ticketUrl),
+    imgBtn('티켓 크게 보기', r.ticketUrl),
     mapBtn(r, r.place || r.title),
     linkBtn('예약 사이트', r.bookingSite),
     linkBtn('공식 사이트', r.officialSite)
@@ -2281,24 +2392,24 @@ function renderBooking() {
   if (S.bookingTab === 'flight') {
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '항공 정보']),
-      h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('flight') })
+      iconBtn('add', '추가', 'btn btn-sm', () => openEntityForm('flight'))
     ]));
     const list = S.flights.slice()
       .filter(f => matchQ(bq, [f.flightNo, f.airline, f.depAirport, f.arrAirport, f.bookingNumber, f.seat, f.memo]))
       .sort((a, b) => String(a.date).localeCompare(String(b.date)));
     if (list.length) list.forEach(f => nodes.push(flightCard(f)));
-    else nodes.push(emptyBox('등록된 항공편이 없습니다', '＋ 추가 버튼으로 항공 정보를 등록해 주세요.\n등록하면 날짜별 일정에도 자동으로 표시됩니다.', '✈️'));
+    else nodes.push(emptyBox('등록된 항공편이 없습니다', '추가 버튼으로 항공 정보를 등록해 주세요.\n등록하면 날짜별 일정에도 자동으로 표시됩니다.', 'flight'));
 
   } else if (S.bookingTab === 'hotel') {
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '숙소 정보']),
-      h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('accommodation') })
+      iconBtn('add', '추가', 'btn btn-sm', () => openEntityForm('accommodation'))
     ]));
     const list = S.accommodations.slice()
       .filter(a => matchQ(bq, [a.name, a.nameJa, a.address, a.addressJa, a.nearestStation, a.bookingNumber, a.memo]))
       .sort((a, b) => String(a.checkInDate).localeCompare(String(b.checkInDate)));
     if (list.length) list.forEach(a => nodes.push(accommodationCard(a, false)));
-    else nodes.push(emptyBox('등록된 숙소가 없습니다', '체크인·체크아웃 시각과 일본어 주소를 넣어 두면 현지에서 편합니다.', '🛏️'));
+    else nodes.push(emptyBox('등록된 숙소가 없습니다', '체크인·체크아웃 시각과 일본어 주소를 넣어 두면 현지에서 편합니다.', 'hotel'));
 
   } else {
     const chips = h('div', { class: 'chips' });
@@ -2312,14 +2423,14 @@ function renderBooking() {
     nodes.push(chips);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '예약 · 티켓']),
-      h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('reservation') })
+      iconBtn('add', '추가', 'btn btn-sm', () => openEntityForm('reservation'))
     ]));
     let list = S.reservations.slice()
       .filter(r => matchQ(bq, [r.title, r.place, r.meetingPoint, r.bookingNumber, r.memo, r.prepare]))
       .sort(sortByDateTime);
     if (S.filters.bookingType !== 'all') list = list.filter(r => r.type === S.filters.bookingType);
     if (list.length) list.forEach(r => nodes.push(reservationCard(r, false)));
-    else nodes.push(emptyBox('등록된 예약이 없습니다', '관광·투어·공연·경기·열차·음식점 예약을 모아 둘 수 있습니다.', '🎟️'));
+    else nodes.push(emptyBox('등록된 예약이 없습니다', '관광·투어·공연·경기·열차·음식점 예약을 모아 둘 수 있습니다.', 'confirmation_number'));
   }
 
   mount(view, nodes.filter(Boolean));
@@ -2327,7 +2438,7 @@ function renderBooking() {
   const addFn = S.bookingTab === 'flight' ? () => openEntityForm('flight')
     : S.bookingTab === 'hotel' ? () => openEntityForm('accommodation')
       : () => openEntityForm('reservation');
-  view.appendChild(h('button', { class: 'fab', 'aria-label': '추가', text: '＋', onclick: addFn }));
+  view.appendChild(h('button', { class: 'fab', 'aria-label': '추가', onclick: addFn }, mi('add', 'mi-lg')));
 }
 
 /* =========================================================================
@@ -2344,14 +2455,13 @@ function phraseCard(p) {
         p.reading ? h('div', { class: 'ja-read', text: p.reading }) : null
       ].filter(Boolean)),
       h('button', {
-        class: 'star-btn', 'aria-label': fav ? '즐겨찾기 해제' : '즐겨찾기 추가',
-        text: fav ? '⭐' : '☆',
+        class: 'star-btn' + (fav ? ' on' : ''), 'aria-label': fav ? '즐겨찾기 해제' : '즐겨찾기 추가',
         onclick: () => toggleFavorite('japanesePhrase', p)
-      })
+      }, mi(fav ? 'star' : 'star_border', fav ? 'filled' : ''))
     ]),
     p.memo ? h('div', { class: 'faint mt8', text: p.memo }) : null,
     h('div', { class: 'ja-actions' }, [
-      h('button', { class: 'btn btn-sm', text: '🔊 듣기', onclick: () => speakJa(p.ja) }),
+      iconBtn('volume_up', '듣기', 'btn btn-sm', () => speakJa(p.ja)),
       h('button', { class: 'btn btn-sm btn-ghost', text: '복사', onclick: () => copyText(p.ja, '일본어 표현') }),
       h('button', { class: 'btn btn-sm btn-ghost', text: '크게 보기', onclick: () => openBigText(p.ja, p.ko + (p.reading ? '\n' + p.reading : '')) }),
       h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('japanesePhrase', p) })
@@ -2363,10 +2473,9 @@ function wordCard(w) {
   const fav = truthy(w.favorite);
   return h('div', { class: 'word-card', onclick: e => { if (e.target.classList.contains('star-btn')) return; openBigText(w.ja, (w.reading || '') + '\n' + (w.ko || '')); } }, [
     h('button', {
-      class: 'star-btn', 'aria-label': fav ? '즐겨찾기 해제' : '즐겨찾기 추가',
-      text: fav ? '⭐' : '☆',
+      class: 'star-btn' + (fav ? ' on' : ''), 'aria-label': fav ? '즐겨찾기 해제' : '즐겨찾기 추가',
       onclick: e => { e.stopPropagation(); toggleFavorite('japaneseWord', w); }
-    }),
+    }, mi(fav ? 'star' : 'star_border', fav ? 'filled' : '')),
     h('div', { class: 'word-ja', text: w.ja || '' }),
     w.reading ? h('div', { class: 'word-read', text: w.reading }) : null,
     h('div', { class: 'word-ko', text: w.ko || '' })
@@ -2384,11 +2493,12 @@ function stationCard(st) {
   return h('div', { class: 'list-item' }, [
     h('div', { class: 'li-head' }, [
       h('div', { style: 'flex:1;min-width:0' }, [
-        h('div', { class: 'li-title', text: '🚉 ' + (st.nameKo || '') + (st.stationNumber ? ' (' + st.stationNumber + ')' : '') }),
+        h('div', { class: 'li-title', text: (st.nameKo || '') + (st.stationNumber ? ' (' + st.stationNumber + ')' : '') }),
         h('div', { class: 'li-sub', style: "font-family:'Hiragino Kaku Gothic ProN','Noto Sans JP',sans-serif", text: (st.nameJa || '') + (st.nameEn ? ' · ' + st.nameEn : '') }),
-        st.lines ? h('div', { class: 'li-sub', text: '🚆 ' + st.lines }) : null
+        st.lines ? h('div', { class: 'li-sub', text: st.lines }) : null
       ].filter(Boolean)),
-      h('button', { class: 'star-btn', 'aria-label': '즐겨찾기', text: fav ? '⭐' : '☆', onclick: () => toggleFavorite('station', st) })
+      h('button', { class: 'star-btn' + (fav ? ' on' : ''), 'aria-label': '즐겨찾기', onclick: () => toggleFavorite('station', st) },
+        mi(fav ? 'star' : 'star_border', fav ? 'filled' : ''))
     ]),
     h('div', { class: 'mt8' }, [
       kv('추천 출구', st.recommendedExit),
@@ -2401,7 +2511,7 @@ function stationCard(st) {
       kv('주변', st.nearby),
       kv('메모', st.memo)
     ].filter(Boolean)),
-    st.photoUrl ? h('img', { src: st.photoUrl, alt: st.nameKo + ' 사진', class: 'preview-thumb', onclick: () => openViewer(st.photoUrl) }) : null,
+    attachGallery(st.photoUrl, st.nameKo + ' 사진'),
     h('div', { class: 'li-actions' }, [
       mapBtn(st, st.nameJa || st.nameKo),
       st.nameJa ? h('button', { class: 'btn btn-sm btn-star', text: '역명 크게 보기', onclick: () => openBigText(st.nameJa, st.nameKo) }) : null,
@@ -2416,7 +2526,7 @@ function stationCard(st) {
 function busCard(b) {
   return h('div', { class: 'list-item' }, [
     h('div', { class: 'li-head' }, [
-      h('div', { class: 'li-title', text: '🚌 ' + (b.lineName || '') }),
+      h('div', { class: 'li-title', text: (b.lineName || '') }),
       sampleBadge(b)
     ].filter(Boolean)),
     h('div', { class: 'li-sub', text: (b.city ? b.city + ' · ' : '') + (b.company || '') }),
@@ -2437,7 +2547,7 @@ function busCard(b) {
       kv('첫차 / 막차', (b.firstBus || '') + (b.lastBus ? ' / ' + b.lastBus : '')),
       kv('메모', b.memo)
     ].filter(Boolean)),
-    b.photoUrl ? h('img', { src: b.photoUrl, alt: '정류장 사진', class: 'preview-thumb', onclick: () => openViewer(b.photoUrl) }) : null,
+    attachGallery(b.photoUrl, '정류장 사진'),
     h('div', { class: 'li-actions' }, [
       mapBtn(b, b.fromStopJa || b.fromStop),
       b.toStopJa ? h('button', { class: 'btn btn-sm btn-star', text: '정류장 크게 보기', onclick: () => openBigText(b.toStopJa, b.toStop || '') }) : null,
@@ -2466,15 +2576,16 @@ function routeCard(r) {
   return h('div', { class: 'list-item' }, [
     h('div', { class: 'li-head' }, [
       h('div', { style: 'flex:1;min-width:0' }, [
-        h('div', { class: 'li-title', text: '🧭 ' + (r.name || '') }),
+        h('div', { class: 'li-title', text: (r.name || '') }),
         h('div', { class: 'li-sub', text: (r.totalMinutes ? '약 ' + r.totalMinutes + '분' : '') + (r.totalCost ? ' · ' + r.totalCost : '') })
       ]),
-      h('button', { class: 'star-btn', 'aria-label': '즐겨찾기', text: truthy(r.favorite) ? '⭐' : '☆', onclick: () => toggleFavorite('route', r) })
+      h('button', { class: 'star-btn' + (truthy(r.favorite) ? ' on' : ''), 'aria-label': '즐겨찾기', onclick: () => toggleFavorite('route', r) },
+        mi(truthy(r.favorite) ? 'star' : 'star_border', truthy(r.favorite) ? 'filled' : ''))
     ]),
     steps.length ? stepWrap : null,
-    r.lastTrain ? h('div', { class: 'depart-hint', text: '🕛 막차 ' + r.lastTrain }) : null,
-    r.caution ? h('div', { class: 'depart-hint', text: '⚠️ ' + r.caution }) : null,
-    r.imageUrl ? h('img', { src: r.imageUrl, alt: '경로 이미지', class: 'preview-thumb', onclick: () => openViewer(r.imageUrl) }) : null,
+    r.lastTrain ? h('div', { class: 'depart-hint', text: '막차 ' + r.lastTrain }) : null,
+    r.caution ? h('div', { class: 'depart-hint', text: r.caution }) : null,
+    attachGallery(r.imageUrl, '경로 이미지'),
     h('div', { class: 'li-actions' }, [
       mapBtn(r, (r.fromPlace || '') + ' ' + (r.toPlace || '')),
       h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('route', r) })
@@ -2518,7 +2629,7 @@ function renderLocal() {
     nodes.push(searchBox('표현 검색 (한국어 · 일본어 · 읽는 법)', S.filters.phraseQ, v => { S.filters.phraseQ = v; renderLocal(); }));
     const chips = h('div', { class: 'chips' });
     chips.appendChild(h('button', {
-      class: 'chip' + (S.filters.phraseFav ? ' active' : ''), text: '⭐ 즐겨찾기',
+      class: 'chip' + (S.filters.phraseFav ? ' active' : ''), text: '즐겨찾기만',
       onclick: () => { S.filters.phraseFav = !S.filters.phraseFav; renderLocal(); }
     }));
     [{ key: 'all', label: '전체' }].concat(CFG.PHRASE_CATEGORIES).forEach(c => {
@@ -2538,16 +2649,16 @@ function renderLocal() {
 
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '표현 ' + list.length + '개']),
-      h('button', { class: 'btn btn-sm', text: '＋ 표현 추가', onclick: () => openEntityForm('japanesePhrase') })
+      iconBtn('add', '표현 추가', 'btn btn-sm', () => openEntityForm('japanesePhrase'))
     ]));
     if (list.length) list.forEach(p => nodes.push(phraseCard(p)));
-    else nodes.push(emptyBox('표현이 없습니다', '검색어나 필터를 바꿔 보세요. Apps Script 에서 seedJapanData() 를 실행하면 기본 표현이 채워집니다.', '💬'));
+    else nodes.push(emptyBox('표현이 없습니다', '검색어나 필터를 바꿔 보세요. Apps Script 에서 seedJapanData() 를 실행하면 기본 표현이 채워집니다.', 'chat_bubble'));
 
   } else if (S.localTab === 'word') {
     nodes.push(searchBox('단어 검색', S.filters.wordQ, v => { S.filters.wordQ = v; renderLocal(); }));
     const chips = h('div', { class: 'chips' });
     chips.appendChild(h('button', {
-      class: 'chip' + (S.filters.wordFav ? ' active' : ''), text: '⭐ 즐겨찾기',
+      class: 'chip' + (S.filters.wordFav ? ' active' : ''), text: '즐겨찾기만',
       onclick: () => { S.filters.wordFav = !S.filters.wordFav; renderLocal(); }
     }));
     [{ key: 'all', label: '전체' }].concat(CFG.WORD_CATEGORIES).forEach(c => {
@@ -2567,7 +2678,7 @@ function renderLocal() {
 
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '단어 ' + list.length + '개']),
-      h('button', { class: 'btn btn-sm', text: '＋ 단어 추가', onclick: () => openEntityForm('japaneseWord') })
+      iconBtn('add', '단어 추가', 'btn btn-sm', () => openEntityForm('japaneseWord'))
     ]));
     if (list.length) {
       const grid = h('div', { class: 'word-grid' });
@@ -2575,7 +2686,7 @@ function renderLocal() {
       nodes.push(grid);
       nodes.push(h('p', { class: 'faint tiny mt8', text: '카드를 누르면 큰 글씨로 볼 수 있습니다.' }));
     } else {
-      nodes.push(emptyBox('단어가 없습니다', 'seedJapanData() 를 실행하면 기본 단어가 채워집니다.', '📚'));
+      nodes.push(emptyBox('단어가 없습니다', 'seedJapanData() 를 실행하면 기본 단어가 채워집니다.', 'menu_book'));
     }
 
   } else if (S.localTab === 'station') {
@@ -2583,13 +2694,13 @@ function renderLocal() {
     const stq = normQ(S.filters.stationQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '저장한 역']),
-      h('button', { class: 'btn btn-sm', text: '＋ 역 추가', onclick: () => openEntityForm('station') })
+      iconBtn('add', '역 추가', 'btn btn-sm', () => openEntityForm('station'))
     ]));
     const list = S.stations.slice()
       .filter(st => matchQ(stq, [st.nameKo, st.nameJa, st.nameEn, st.lines, st.city, st.nearby, st.recommendedExit, st.memo]))
       .sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
     if (list.length) list.forEach(st => nodes.push(stationCard(st)));
-    else nodes.push(emptyBox('저장된 역이 없습니다', '여행에 필요한 역만 골라 저장해 두면 현지에서 빠르게 확인할 수 있습니다.', '🚉'));
+    else nodes.push(emptyBox('저장된 역이 없습니다', '여행에 필요한 역만 골라 저장해 두면 현지에서 빠르게 확인할 수 있습니다.', 'train'));
     nodes.push(externalLinkCard());
 
   } else if (S.localTab === 'bus') {
@@ -2597,24 +2708,24 @@ function renderLocal() {
     const bsq = normQ(S.filters.busQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '버스 정보']),
-      h('button', { class: 'btn btn-sm', text: '＋ 버스 추가', onclick: () => openEntityForm('bus') })
+      iconBtn('add', '버스 추가', 'btn btn-sm', () => openEntityForm('bus'))
     ]));
     const buses = S.buses.filter(b => matchQ(bsq, [b.lineName, b.company, b.city, b.fromStop, b.toStop, b.fromStopJa, b.toStopJa, b.memo]));
     if (buses.length) buses.forEach(b => nodes.push(busCard(b)));
-    else nodes.push(emptyBox('저장된 버스 정보가 없습니다', '지역마다 타는 방법이 다릅니다. 미리 적어 두면 든든합니다.', '🚌'));
+    else nodes.push(emptyBox('저장된 버스 정보가 없습니다', '지역마다 타는 방법이 다릅니다. 미리 적어 두면 든든합니다.', 'directions_bus'));
 
   } else {
     nodes.push(searchBox('경로 검색 (경로명 · 출발지 · 도착지)', S.filters.routeQ, v => { S.filters.routeQ = v; renderLocal(); }));
     const rq = normQ(S.filters.routeQ);
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '이동 경로']),
-      h('button', { class: 'btn btn-sm', text: '＋ 경로 추가', onclick: () => openEntityForm('route') })
+      iconBtn('add', '경로 추가', 'btn btn-sm', () => openEntityForm('route'))
     ]));
     const list = S.routes.slice()
       .filter(r => matchQ(rq, [r.name, r.fromPlace, r.toPlace, r.caution, r.memo, r.steps]))
       .sort((a, b) => (truthy(b.favorite) ? 1 : 0) - (truthy(a.favorite) ? 1 : 0));
     if (list.length) list.forEach(r => nodes.push(routeCard(r)));
-    else nodes.push(emptyBox('저장된 경로가 없습니다', '예: 삿포로역 → 기타히로시마역 → 에스콘필드', '🧭'));
+    else nodes.push(emptyBox('저장된 경로가 없습니다', '예: 삿포로역 → 기타히로시마역 → 에스콘필드', 'explore'));
   }
 
   mount(view, nodes.filter(Boolean));
@@ -2623,9 +2734,9 @@ function renderLocal() {
     phrase: 'japanesePhrase', word: 'japaneseWord', station: 'station', bus: 'bus', route: 'route'
   };
   view.appendChild(h('button', {
-    class: 'fab', 'aria-label': '추가', text: '＋',
+    class: 'fab', 'aria-label': '추가',
     onclick: () => openEntityForm(addMap[S.localTab])
-  }));
+  }, mi('add', 'mi-lg')));
 }
 
 function externalLinkCard() {
@@ -2641,38 +2752,201 @@ function externalLinkCard() {
 }
 
 /* =========================================================================
- * 13. 기록 화면
+ * 13. 기록 화면 (내 기록 · 공동 기록을 하나의 피드로 통합)
  * ========================================================================= */
 
+/**
+ * 특정 날짜의 모든 데이터를 한 번에 모읍니다.
+ * 일정 · 예약 · 항공 · 숙소 · 기록 · 사진 · 지출이 '날짜'를 축으로 연결됩니다.
+ */
+function dayBundle(date) {
+  const inStay = a => a.checkInDate && a.checkInDate <= date && date <= (a.checkOutDate || a.checkInDate);
+  return {
+    date: date,
+    schedules: S.schedules.filter(x => x.date === date).slice().sort(sortByTime),
+    flights: S.flights.filter(x => x.date === date),
+    accommodations: S.accommodations.filter(inStay),
+    reservations: S.reservations.filter(x => x.date === date).slice().sort(sortByTime),
+    records: dayRecords(date),
+    photos: S.photos.filter(x => x.date === date),
+    expenses: S.expenses.filter(x => x.date === date),
+    routes: S.routes
+  };
+}
+
+/**
+ * 하루의 기록을 하나의 목록으로 만듭니다.
+ * 개인 기록(DailyRecords)과 예전 공동 기록(SharedRecords)을 구분 없이 합치고,
+ * 각 항목에 '누가 썼는지'를 담아 돌려줍니다.
+ */
+function dayRecords(date) {
+  const mine = S.dailyRecords
+    .filter(r => r.date === date)
+    .map(r => Object.assign({}, r, { _kind: 'daily', _author: r.author || r.createdBy || '' }));
+
+  const shared = S.sharedRecords
+    .filter(r => r.date === date)
+    .map(r => Object.assign({}, r, { _kind: 'shared', _author: r.createdBy || '' }));
+
+  const all = mine.concat(shared);
+  // 내 기록을 맨 앞에, 나머지는 작성 시각 순으로
+  all.sort((a, b) => {
+    const am = a._author === S.me ? 0 : 1;
+    const bm = b._author === S.me ? 0 : 1;
+    if (am !== bm) return am - bm;
+    return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+  });
+  return all;
+}
+
+/** 기록 카드 한 장 (작성자 표시 포함) */
 function recordCard(rec) {
-  const mine = rec.author === S.me;
-  const m = memberInfo(rec.author);
-  const nodes = [
-    h('div', { class: 'record-who' }, [
-      document.createTextNode(m.emoji + ' ' + (rec.author || '')),
-      mine ? h('span', { class: 'badge badge-mine', style: 'margin-left:6px', text: '내 기록' }) : null,
-      sampleBadge(rec)
-    ].filter(Boolean))
-  ];
-  if (rec.oneLine) nodes.push(h('div', { class: 'record-oneline', text: '“' + rec.oneLine + '”' }));
-  if (rec.photoUrl) nodes.push(h('img', { src: rec.photoUrl, alt: '오늘의 대표 사진', class: 'record-photo', onclick: () => openViewer(rec.photoUrl) }));
+  const author = rec._author || rec.author || rec.createdBy || '';
+  const mine = author === S.me;
+  const m = memberInfo(author);
+  const isShared = rec._kind === 'shared';
+
+  const head = h('div', { class: 'record-head' }, [
+    h('span', { class: 'record-avatar', style: 'background:' + (m.color || '#7d9db3'), text: (m.emoji || '') }),
+    h('div', { style: 'flex:1;min-width:0' }, [
+      h('div', { class: 'record-who', text: m.displayName || author || '이름 없음' }),
+      h('div', { class: 'faint tiny', text: (isShared ? '함께 쓴 기록 · ' : '') + (rec.updatedAt ? fmtSyncTime(rec.updatedAt) + ' 수정' : '') })
+    ]),
+    mine ? h('span', { class: 'badge badge-mine', text: '나' }) : h('span', { class: 'badge badge-partner', text: '파트너' }),
+    sampleBadge(rec)
+  ].filter(Boolean));
+
+  const nodes = [head];
+
+  const oneLine = rec.oneLine || rec.title;
+  if (oneLine) nodes.push(h('div', { class: 'record-oneline', text: '“' + oneLine + '”' }));
+
+  const g = attachGallery(rec.photoUrl, '기록 사진');
+  if (g) nodes.push(g);
+
   [
     ['방문한 장소', rec.places], ['기억에 남은 순간', rec.bestMoment], ['먹은 음식', rec.foods],
-    ['오늘의 색깔', rec.color], ['오늘의 음악', rec.music], ['예상과 달랐던 점', rec.surprise],
-    ['다시 가고 싶은 곳', rec.revisit], ['내일 기대되는 것', rec.tomorrow], ['자유 기록', rec.freeText]
-  ].forEach(p => { const n = kv(p[0], p[1]); if (n) nodes.push(n); });
+    ['함께 기억하고 싶은 말', rec.words], ['오늘의 색깔', rec.color], ['오늘의 음악', rec.music],
+    ['예상과 달랐던 점', rec.surprise], ['다시 가고 싶은 곳', rec.revisit],
+    ['내일 기대되는 것', rec.tomorrow], ['자유 기록', rec.freeText], ['메모', rec.memo]
+  ].forEach(pair => { const n = kv(pair[0], pair[1]); if (n) nodes.push(n); });
+
   if (rec.rating) {
     nodes.push(h('div', { class: 'kv' }, [
       h('div', { class: 'kv-k', text: '만족도' }),
-      h('div', { class: 'kv-v rating', text: '★'.repeat(Number(rec.rating) || 0) + '☆'.repeat(5 - (Number(rec.rating) || 0)) })
+      h('div', { class: 'kv-v rating' },
+        [1, 2, 3, 4, 5].map(n => mi(n <= Number(rec.rating) ? 'star' : 'star_border',
+          'mi-sm' + (n <= Number(rec.rating) ? ' filled' : ''))))
     ]));
   }
-  nodes.push(h('div', { class: 'li-actions' }, [
-    mine ? h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('dailyRecord', rec) }) : null,
-    h('span', { class: 'faint tiny', text: rec.updatedAt ? '수정 ' + fmtSyncTime(rec.updatedAt) : '' })
-  ].filter(Boolean)));
+
+  if (mine) {
+    nodes.push(h('div', { class: 'li-actions' }, [
+      iconBtn('edit', '수정', 'btn btn-sm btn-ghost',
+        () => openEntityForm(isShared ? 'sharedRecord' : 'dailyRecord', rec))
+    ]));
+  }
 
   return h('div', { class: 'record-card' + (mine ? ' mine' : '') }, nodes.filter(Boolean));
+}
+
+/**
+ * 기록 작성 폼을 열면서, 같은 날짜의 일정을 불러올 수 있게 합니다.
+ */
+function openRecordForm(date, rec) {
+  const preset = { date: date, author: S.me };
+  openEntityForm('dailyRecord', rec || null, preset);
+  // 폼이 열린 뒤 맨 위에 "일정 불러오기" 버튼을 얹습니다
+  const body = $('#sheetBody');
+  if (!body || !body.firstChild) return;
+  const bundle = dayBundle(date);
+  if (!bundle.schedules.length && !bundle.reservations.length) return;
+
+  const importBtn = h('div', { class: 'import-box' }, [
+    h('div', { class: 'row' }, [
+      mi('event_available', 'mi-sm'),
+      h('span', { style: 'flex:1', class: 'tiny', text: fmtDateKo(date, true) + ' 일정 ' + bundle.schedules.length + '건이 있습니다.' })
+    ]),
+    h('button', {
+      type: 'button', class: 'btn btn-sm btn-block mt8', text: '이 날 일정을 기록에 불러오기',
+      onclick: e => {
+        const placesInput = $$('#sheetBody textarea')[0];
+        const titles = bundle.schedules.map(x =>
+          (x.startTime ? x.startTime + ' ' : '') + x.title + (x.place ? ' (' + x.place + ')' : ''));
+        bundle.reservations.forEach(r => { if (r.title) titles.push((r.startTime || '') + ' ' + r.title); });
+        if (!titles.length) { toast('불러올 일정이 없습니다.', 'error'); return; }
+        if (placesInput) {
+          const cur = placesInput.value.trim();
+          placesInput.value = (cur ? cur + '\n' : '') + titles.join('\n');
+          placesInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        e.currentTarget.disabled = true;
+        e.currentTarget.textContent = '불러왔습니다';
+        toast('일정 ' + titles.length + '건을 기록에 넣었습니다.', 'ok');
+      }
+    })
+  ]);
+  body.insertBefore(importBtn, body.firstChild);
+}
+
+/** 그 날의 일정을 기록 화면에서 간단히 보여주는 카드 */
+function dayLinkCard(bundle) {
+  const b = bundle;
+  const total = b.schedules.length + b.flights.length + b.reservations.length;
+  if (!total && !b.expenses.length && !b.accommodations.length) return null;
+
+  const card = h('div', { class: 'card card-tight day-link' });
+  card.appendChild(h('div', { class: 'row mb8' }, [
+    mi('link', 'mi-sm'),
+    h('span', { class: 'section-title', style: 'font-size:.9rem', text: '이 날의 일정' }),
+    h('span', { class: 'spacer' }),
+    h('button', { class: 'btn btn-sm btn-ghost', text: '일정 탭에서 보기', onclick: () => goSchedule(b.date) })
+  ]));
+
+  if (total) {
+    const ul = h('div');
+    b.schedules.slice(0, 6).forEach(x => {
+      ul.appendChild(h('div', { class: 'day-link-row' }, [
+        h('span', { class: 'day-link-time', text: x.startTime || '––:––' }),
+        mi(catInfo(x.category).icon, 'mi-sm'),
+        h('span', { style: 'flex:1;min-width:0', text: x.title })
+      ]));
+    });
+    b.flights.forEach(f => {
+      ul.appendChild(h('div', { class: 'day-link-row' }, [
+        h('span', { class: 'day-link-time', text: f.depTime || '––:––' }),
+        mi('flight', 'mi-sm'),
+        h('span', { style: 'flex:1;min-width:0', text: (f.flightNo || '') + ' ' + (f.depAirport || '') + '→' + (f.arrAirport || '') })
+      ]));
+    });
+    if (b.schedules.length > 6) {
+      ul.appendChild(h('div', { class: 'faint tiny', style: 'padding:4px 2px', text: '외 ' + (b.schedules.length - 6) + '건' }));
+    }
+    card.appendChild(ul);
+  } else {
+    card.appendChild(h('div', { class: 'faint tiny', text: '등록된 일정이 없습니다.' }));
+  }
+
+  if (b.accommodations.length) {
+    card.appendChild(h('div', { class: 'day-link-row' }, [
+      h('span', { class: 'day-link-time', text: '숙소' }),
+      mi('hotel', 'mi-sm'),
+      h('span', { style: 'flex:1;min-width:0', text: b.accommodations.map(a => a.name).join(', ') })
+    ]));
+  }
+  if (b.expenses.length) {
+    const sum = {};
+    b.expenses.forEach(e => {
+      const c = e.currency || CO.currency;
+      sum[c] = (sum[c] || 0) + (Number(e.amount) || 0);
+    });
+    card.appendChild(h('div', { class: 'day-link-row' }, [
+      h('span', { class: 'day-link-time', text: '지출' }),
+      mi('payments', 'mi-sm'),
+      h('span', { style: 'flex:1;min-width:0', text: Object.keys(sum).map(c => c + ' ' + sum[c].toLocaleString()).join(' · ') })
+    ]));
+  }
+  return card;
 }
 
 function renderRecord() {
@@ -2681,7 +2955,10 @@ function renderRecord() {
   ensureDefaultDates();
   const nodes = [];
 
-  const tabs = [{ k: 'day', l: '날짜별 기록' }, { k: 'photo', l: '사진' }, { k: 'expense', l: '지출' }, { k: 'summary', l: '여행 요약' }];
+  const tabs = [
+    { k: 'day', l: '날짜별 기록' }, { k: 'photo', l: '사진' },
+    { k: 'expense', l: '지출' }, { k: 'summary', l: '여행 요약' }
+  ];
   const bar = h('div', { class: 'subtabs' });
   tabs.forEach(t => {
     bar.appendChild(h('button', {
@@ -2692,83 +2969,65 @@ function renderRecord() {
   nodes.push(bar);
 
   if (S.recordTab === 'day') {
-    const date = S.recordDate;
-    nodes.push(renderDateStrip(date, d => { S.recordDate = d; renderRecord(); }));
+    const date = S.date;
+    const bundle = dayBundle(date);
+    nodes.push(renderDateStrip(date, d => { S.date = d; renderRecord(); }));
+
+    const myRecord = bundle.records.filter(r => r._kind === 'daily' && r._author === S.me)[0];
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), fmtDateFull(date)]),
-      h('button', {
-        class: 'btn btn-sm', text: '✍️ 내 기록',
-        onclick: () => openEntityForm('dailyRecord', S.dailyRecords.filter(r => r.date === date && r.author === S.me)[0] || null, { date: date, author: S.me })
-      })
+      iconBtn(myRecord ? 'edit' : 'edit_note', myRecord ? '내 기록 수정' : '기록 쓰기', 'btn btn-sm btn-primary',
+        () => openRecordForm(date, myRecord))
     ]));
 
-    const recs = S.dailyRecords.filter(r => r.date === date);
-    const order = [S.me].concat(S.members.map(m => m.nickname).filter(n => n !== S.me));
-    const sorted = [];
-    order.forEach(n => { recs.filter(r => r.author === n).forEach(r => sorted.push(r)); });
-    recs.forEach(r => { if (sorted.indexOf(r) < 0) sorted.push(r); });
+    // 같은 날짜의 일정과 연결해서 보여줍니다
+    const link = dayLinkCard(bundle);
+    if (link) nodes.push(link);
 
-    if (sorted.length) {
-      const pair = h('div', { class: 'record-pair' });
-      sorted.forEach(r => pair.appendChild(recordCard(r)));
-      nodes.push(pair);
+    if (bundle.records.length) {
+      const feed = h('div', { class: 'record-feed' });
+      bundle.records.forEach(r => feed.appendChild(recordCard(r)));
+      nodes.push(feed);
     } else {
-      nodes.push(emptyBox('이 날의 기록이 아직 없습니다', '같은 하루를 서로 다른 시선으로 남겨보세요.', '📖'));
+      nodes.push(emptyBox('이 날의 기록이 아직 없습니다',
+        '같은 하루를 서로 다른 시선으로 남겨보세요. 두 사람의 기록이 여기에 나란히 쌓입니다.', 'auto_stories'));
     }
 
-    /* 공동 기록 */
-    const shared = S.sharedRecords.filter(r => r.date === date)[0];
-    nodes.push(h('div', { class: 'section-head' }, [
-      h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '공동 기록']),
-      h('button', {
-        class: 'btn btn-sm', text: shared ? '수정' : '＋ 작성',
-        onclick: () => openEntityForm('sharedRecord', shared || null, { date: date })
-      })
-    ]));
-    if (shared) {
-      const nodesS = [];
-      if (shared.title) nodesS.push(h('div', { class: 'li-title', text: '“' + shared.title + '”' }));
-      if (shared.photoUrl) nodesS.push(h('img', { src: shared.photoUrl, alt: '공동 대표 사진', class: 'record-photo', onclick: () => openViewer(shared.photoUrl) }));
-      [['베스트 순간', shared.bestMoment], ['함께 기억하고 싶은 말', shared.words], ['공동 메모', shared.memo]]
-        .forEach(p => { const n = kv(p[0], p[1]); if (n) nodesS.push(n); });
-      nodesS.push(h('div', { class: 'row-wrap mt8' }, [authorBadge(shared)].filter(Boolean)));
-      nodes.push(h('div', { class: 'card shared-card' }, nodesS.filter(Boolean)));
-    } else {
-      nodes.push(h('p', { class: 'faint', style: 'text-align:center;padding:8px', text: '두 사람이 함께 남기는 기록입니다.' }));
-    }
-
-    /* 이 날의 사진 */
-    const dayPhotos = S.photos.filter(p => p.date === date);
-    if (dayPhotos.length) {
-      nodes.push(h('div', { class: 'section-head' }, h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '이 날의 사진'])));
+    if (bundle.photos.length) {
+      nodes.push(h('div', { class: 'section-head' }, [
+        h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '이 날의 사진 ' + bundle.photos.length + '장']),
+        iconBtn('add_photo_alternate', '추가', 'btn btn-sm', openPhotoUpload)
+      ]));
       const grid = h('div', { class: 'photo-grid' });
-      dayPhotos.forEach(p => grid.appendChild(h('img', { src: p.url, alt: p.name || '사진', loading: 'lazy', onclick: () => openViewer(p.url) })));
+      const urls = bundle.photos.map(p => p.url);
+      bundle.photos.forEach((p, i) => grid.appendChild(h('img', {
+        src: p.url, alt: p.name || '사진', loading: 'lazy', onclick: () => openGallery(urls, '사진', i)
+      })));
       nodes.push(grid);
     }
 
   } else if (S.recordTab === 'photo') {
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '사진 ' + S.photos.length + '장']),
-      h('button', { class: 'btn btn-sm', text: '＋ 업로드', onclick: openPhotoUpload })
+      iconBtn('add_photo_alternate', '업로드', 'btn btn-sm', openPhotoUpload)
     ]));
     if (S.photos.length) {
       const grid = h('div', { class: 'photo-grid' });
       S.photos.slice().reverse().forEach(p => {
         grid.appendChild(h('img', {
-          src: p.url, alt: p.name || '사진', loading: 'lazy',
-          onclick: () => openPhotoDetail(p)
+          src: p.url, alt: p.name || '사진', loading: 'lazy', onclick: () => openPhotoDetail(p)
         }));
       });
       nodes.push(grid);
       nodes.push(h('p', { class: 'faint tiny mt8', text: '사진은 Google Drive 에 저장되고, 시트에는 링크만 기록됩니다.' }));
     } else {
-      nodes.push(emptyBox('업로드한 사진이 없습니다', '스마트폰에서 사진을 고르면 자동으로 압축해서 올립니다.', '📷'));
+      nodes.push(emptyBox('업로드한 사진이 없습니다', '스마트폰에서 사진을 여러 장 골라 한 번에 올릴 수 있습니다.', 'photo_camera'));
     }
 
   } else if (S.recordTab === 'expense') {
     nodes.push(h('div', { class: 'section-head' }, [
       h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '지출']),
-      h('button', { class: 'btn btn-sm', text: '＋ 추가', onclick: () => openEntityForm('expense', null, { date: S.recordDate, payer: S.me }) })
+      iconBtn('add', '추가', 'btn btn-sm', () => openEntityForm('expense', null, { date: S.date, payer: S.me }))
     ]));
     const list = S.expenses.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
     if (list.length) {
@@ -2790,12 +3049,12 @@ function renderRecord() {
           ]),
           h('div', { class: 'li-sub', text: fmtDateKo(e.date, true) + (e.category ? ' · ' + e.category : '') + (e.payer ? ' · ' + e.payer : '') }),
           h('div', { class: 'li-actions' }, [
-            h('button', { class: 'btn btn-sm btn-ghost', text: '수정', onclick: () => openEntityForm('expense', e) })
+            iconBtn('edit', '수정', 'btn btn-sm btn-ghost', () => openEntityForm('expense', e))
           ])
         ]));
       });
     } else {
-      nodes.push(emptyBox('기록된 지출이 없습니다', '간단히 적어 두면 여행 후 정산이 쉬워집니다.', '💴'));
+      nodes.push(emptyBox('기록된 지출이 없습니다', '간단히 적어 두면 여행 후 정산이 쉬워집니다.', 'payments'));
     }
 
   } else {
@@ -2803,6 +3062,13 @@ function renderRecord() {
   }
 
   mount(view, nodes.filter(Boolean));
+
+  if (S.recordTab === 'day') {
+    view.appendChild(h('button', {
+      class: 'fab', 'aria-label': '기록 쓰기',
+      onclick: () => openRecordForm(S.date, dayRecords(S.date).filter(r => r._kind === 'daily' && r._author === S.me)[0])
+    }, mi('edit', 'mi-lg')));
+  }
 }
 
 function renderSummary() {
@@ -2826,7 +3092,7 @@ function renderSummary() {
   [
     ['여행 일수', dates.length + '일'],
     ['등록한 일정', S.schedules.length + '개'],
-    ['작성한 기록', S.dailyRecords.length + '개 (공동 ' + S.sharedRecords.length + '개)'],
+    ['작성한 기록', (S.dailyRecords.length + S.sharedRecords.length) + '개'],
     ['올린 사진', S.photos.length + '장'],
     ['평균 만족도', ratings.length ? avg.toFixed(1) + ' / 5' : '아직 없음'],
     ['총 지출', Object.keys(totals).length ? Object.keys(totals).map(c => c + ' ' + totals[c].toLocaleString()).join(' · ') : '기록 없음'],
@@ -2850,7 +3116,7 @@ function renderSummary() {
 }
 
 function openPhotoUpload() {
-  const values = { url: '', date: S.recordDate || todayStr() };
+  const values = { url: '', date: S.date || todayStr() };
   const body = h('div');
   const dateRow = buildField({ k: 'date', l: '어느 날짜의 사진인가요?', t: 'date' }, values, {});
   body.appendChild(dateRow);
@@ -2883,7 +3149,7 @@ function openPhotoUpload() {
     silentRefresh();
   });
 
-  body.appendChild(h('button', { type: 'button', class: 'btn btn-primary btn-block', text: '📷 사진 선택 (여러 장 가능)', onclick: () => fileInput.click() }));
+  body.appendChild(h('button', { type: 'button', class: 'btn btn-primary btn-block', text: '사진 여러 장 선택', onclick: () => fileInput.click() }));
   body.appendChild(fileInput);
   body.appendChild(progress);
   body.appendChild(result);
@@ -2936,7 +3202,7 @@ function matchQ(q, fields) {
 }
 
 /** 탭 이동 도우미 (검색 결과에서 사용) */
-function goSchedule(date) { if (date) S.scheduleDate = date; switchTab('schedule'); }
+function goSchedule(date) { if (date) S.date = date; switchTab('schedule'); }
 function goBooking(tab) { S.bookingTab = tab || 'flight'; switchTab('booking'); }
 function goLocal(tab, q) {
   S.localTab = tab;
@@ -2948,7 +3214,7 @@ function goLocal(tab, q) {
   switchTab('local');
 }
 function goRecord(date) {
-  if (date) S.recordDate = date;
+  if (date) S.date = date;
   S.recordTab = 'day';
   switchTab('record');
 }
@@ -3071,7 +3337,7 @@ function searchAll(rawQuery) {
     })));
 
   /* 공동 기록 */
-  add('shared', '공동 기록', S.sharedRecords
+  add('shared', '기록 (함께 쓴 기록)', S.sharedRecords
     .filter(r => matchQ(q, [r.title, r.bestMoment, r.words, r.memo]))
     .sort(sortByDateTime)
     .map(r => ({
@@ -3110,7 +3376,7 @@ function openGlobalSearch(initial) {
   }, [
     h('div', { class: 'row', style: 'gap:6px' }, [
       h('div', { style: 'flex:1' }, input),
-      h('button', { class: 'icon-btn', 'aria-label': '닫기', text: '✕', onclick: () => close() })
+      h('button', { class: 'icon-btn', 'aria-label': '닫기', onclick: () => close() }, mi('close'))
     ]),
     h('div', { style: 'flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch' }, results)
   ]);
@@ -3134,7 +3400,7 @@ function openGlobalSearch(initial) {
     }
     const groups = searchAll(q);
     if (!groups.length) {
-      results.appendChild(emptyBox('결과가 없습니다', '"' + q + '" 와(과) 일치하는 내용을 찾지 못했습니다.', '🔍'));
+      results.appendChild(emptyBox('결과가 없습니다', '"' + q + '" 와(과) 일치하는 내용을 찾지 못했습니다.', 'search'));
       return;
     }
     let count = 0;
@@ -3189,17 +3455,38 @@ function renderCurrentTab() {
   else if (S.tab === 'record') renderRecord();
 }
 
+/** 모바일 하단 탭바 + PC 사이드바를 같은 정의로 만듭니다 */
+function buildNav() {
+  const bar = $('#tabbar');
+  const side = $('#sideNav');
+  clear(bar); clear(side);
+
+  TABS.forEach(t => {
+    bar.appendChild(h('button', {
+      type: 'button', role: 'tab', class: 'tab-btn', 'aria-label': t.label,
+      dataset: { tab: t.key }, onclick: () => switchTab(t.key)
+    }, [mi(t.icon, 'tab-ico'), h('span', { class: 'tab-label', text: t.label })]));
+
+    side.appendChild(h('button', {
+      type: 'button', role: 'tab', class: 'nav-btn', 'aria-label': t.label,
+      dataset: { tab: t.key }, onclick: () => switchTab(t.key)
+    }, [mi(t.icon), h('span', { text: t.label })]));
+  });
+}
+
 function switchTab(tab) {
   S.tab = tab;
-  ['today', 'schedule', 'booking', 'local', 'record'].forEach(t => {
-    $('#view-' + t).classList.toggle('hidden', t !== tab);
-  });
-  $$('.tab-btn').forEach(b => {
+  TABS.forEach(t => { $('#view-' + t.key).classList.toggle('hidden', t.key !== tab); });
+  $$('.tab-btn, .nav-btn').forEach(b => {
     const on = b.dataset.tab === tab;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
+  const cur = TABS.filter(t => t.key === tab)[0];
+  if (cur) $('#headerPage').textContent = cur.label;
   window.scrollTo(0, 0);
+  const main = $('#appMain');
+  if (main) main.scrollTop = 0;
   renderCurrentTab();
 }
 
@@ -3212,23 +3499,23 @@ function openMenu() {
   ]));
 
   const items = [
-    { label: '🧳 여행 기본 정보 수정', fn: () => { closeSheet(true); openEntityForm('trip', S.trip); } },
-    { label: '🔍 전체 검색', fn: () => { closeSheet(true); openGlobalSearch(''); } },
-    { label: '🔄 지금 새로고침', fn: async () => { closeSheet(true); await bootstrap(true); toast('최신 자료를 불러왔습니다.', 'ok'); } },
-    { label: '📝 임시 저장 (' + draftCount() + ')', fn: () => openDrafts() },
-    { label: '🌙 밝기 테마 바꾸기', fn: () => { toggleTheme(); } },
-    { label: '🗑️ 저장된 오프라인 자료 지우기', fn: async () => {
+    { icon: 'luggage', label: '여행 기본 정보 수정', fn: () => { closeSheet(true); openEntityForm('trip', S.trip); } },
+    { icon: 'search', label: '전체 검색', fn: () => { closeSheet(true); openGlobalSearch(''); } },
+    { icon: 'refresh', label: '지금 새로고침', fn: async () => { closeSheet(true); await bootstrap(true); toast('최신 자료를 불러왔습니다.', 'ok'); } },
+    { icon: 'edit_note', label: '임시 저장 (' + draftCount() + ')', fn: () => openDrafts() },
+    { icon: 'dark_mode', label: '밝기 테마 바꾸기', fn: () => { toggleTheme(); } },
+    { icon: 'delete_sweep', label: '저장된 오프라인 자료 지우기', fn: async () => {
         const yes = await confirmBox('오프라인 자료 삭제', '이 기기에 저장된 자료를 지웁니다.\n(서버 데이터는 지워지지 않습니다.)', '지우기');
         if (!yes) return;
         lsDel(CACHE_KEY);
         toast('삭제했습니다.', 'ok');
       } },
-    { label: '🚪 로그아웃', fn: async () => { await closeSheet(true); doLogout(); } }
+    { icon: 'logout', label: '로그아웃', fn: async () => { await closeSheet(true); doLogout(); } }
   ];
   items.forEach(it => {
     body.appendChild(h('button', {
-      class: 'btn btn-block mt8', style: 'justify-content:flex-start', text: it.label, onclick: it.fn
-    }));
+      class: 'btn btn-block mt8', style: 'justify-content:flex-start', onclick: it.fn
+    }, [mi(it.icon, 'mi-sm'), h('span', { text: it.label })]));
   });
 
   body.appendChild(h('div', { class: 'section-head' }, h('h2', { class: 'section-title', text: '앱 정보' })));
@@ -3258,13 +3545,17 @@ function toggleTheme() {
 
 function bindGlobalEvents() {
   $('#loginForm').addEventListener('submit', doLogin);
-  $$('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-  $('#refreshBtn').addEventListener('click', async () => {
+  const doRefresh = async () => {
     await bootstrap(true);
     toast('최신 자료를 불러왔습니다.', 'ok', 1600);
-  });
+  };
+  // 모바일 헤더 · PC 사이드바 양쪽 버튼을 같은 동작에 연결합니다
+  $('#refreshBtn').addEventListener('click', doRefresh);
+  $('#sideRefreshBtn').addEventListener('click', doRefresh);
   $('#menuBtn').addEventListener('click', openMenu);
+  $('#sideMenuBtn').addEventListener('click', openMenu);
   $('#searchBtn').addEventListener('click', () => openGlobalSearch(''));
+  $('#sideSearchBtn').addEventListener('click', () => openGlobalSearch(''));
   $('#sheetClose').addEventListener('click', () => closeSheet(false));
   $('#sheetBackdrop').addEventListener('click', e => { if (e.target === $('#sheetBackdrop')) closeSheet(false); });
   $('#viewerClose').addEventListener('click', () => $('#viewer').classList.add('hidden'));
@@ -3306,6 +3597,29 @@ function bindGlobalEvents() {
   setInterval(() => { if (S.tab === 'today' && S.booted) renderToday(); }, 60000);
 }
 
+/**
+ * Material Symbols 폰트가 준비되면 아이콘을 보여줍니다.
+ * 폰트를 못 받아도(오프라인 등) 3초 뒤에는 화면을 그대로 보여줍니다.
+ */
+function waitForIconFont() {
+  const root = document.documentElement;
+  const FONT = '24px "Material Symbols Rounded"';
+  let done = false;
+  // 성공하면 아이콘을 보여주고, 실패하면 아예 숨깁니다.
+  // (숨기지 않으면 'search' 같은 ligature 원문이 글자로 보입니다)
+  const finish = ok => {
+    if (done) return;
+    done = true;
+    root.classList.add(ok ? 'mi-ready' : 'mi-off');
+  };
+
+  if (!document.fonts || !document.fonts.load) { finish(true); return; }
+  setTimeout(() => finish(document.fonts.check(FONT)), 3500);
+  document.fonts.load(FONT, 'search')
+    .then(list => finish(!!(list && list.length)))
+    .catch(() => finish(false));
+}
+
 async function init() {
   // 테마
   const theme = lsGet('theme', '');
@@ -3319,8 +3633,10 @@ async function init() {
 
   $('#loginTripCode').value = lsGet('tripCode', CFG.DEFAULT_TRIP_CODE || '');
   buildUserPicker();
+  buildNav();
   bindGlobalEvents();
   updateNetDot();
+  waitForIconFont();
 
   // 서비스 워커 등록 (PWA)
   if ('serviceWorker' in navigator) {

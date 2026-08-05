@@ -86,19 +86,20 @@ const DEFAULT_TRIP_CODE = 'bestone';
 /* ------------------------------------------------------------------
  * 4) 일정 / 예약 카테고리
  * ---------------------------------------------------------------- */
+/* icon 값은 Google Material Symbols 의 아이콘 이름입니다 */
 const CATEGORIES = [
-  { key: 'flight',      label: '항공',      emoji: '✈️', color: '#7d9db3' },
-  { key: 'hotel',       label: '숙소',      emoji: '🛏️', color: '#c9a227' },
-  { key: 'sightseeing', label: '관광',      emoji: '🗼', color: '#5b8c5a' },
-  { key: 'tour',        label: '투어',      emoji: '🧭', color: '#b5763c' },
-  { key: 'food',        label: '음식점',    emoji: '🍜', color: '#c96f4a' },
-  { key: 'show',        label: '공연',      emoji: '🎭', color: '#8a6fb0' },
-  { key: 'sports',      label: '경기',      emoji: '⚾', color: '#3f7f6f' },
-  { key: 'shopping',    label: '쇼핑',      emoji: '🛍️', color: '#c2708f' },
-  { key: 'train',       label: '열차',      emoji: '🚆', color: '#4a6fa5' },
-  { key: 'move',        label: '이동',      emoji: '🚌', color: '#6b7f99' },
-  { key: 'free',        label: '자유 시간', emoji: '🌤️', color: '#9aa6b2' },
-  { key: 'etc',         label: '기타',      emoji: '📌', color: '#8b8377' }
+  { key: 'flight',      label: '항공',      icon: 'flight',              color: '#7d9db3' },
+  { key: 'hotel',       label: '숙소',      icon: 'hotel',               color: '#c9a227' },
+  { key: 'sightseeing', label: '관광',      icon: 'photo_camera',        color: '#5b8c5a' },
+  { key: 'tour',        label: '투어',      icon: 'tour',                color: '#b5763c' },
+  { key: 'food',        label: '음식점',    icon: 'restaurant',          color: '#c96f4a' },
+  { key: 'show',        label: '공연',      icon: 'theater_comedy',      color: '#8a6fb0' },
+  { key: 'sports',      label: '경기',      icon: 'sports_baseball',     color: '#3f7f6f' },
+  { key: 'shopping',    label: '쇼핑',      icon: 'shopping_bag',        color: '#c2708f' },
+  { key: 'train',       label: '열차',      icon: 'train',               color: '#4a6fa5' },
+  { key: 'move',        label: '이동',      icon: 'directions_bus',      color: '#6b7f99' },
+  { key: 'free',        label: '자유 시간', icon: 'wb_sunny',            color: '#9aa6b2' },
+  { key: 'etc',         label: '기타',      icon: 'push_pin',            color: '#8b8377' }
 ];
 
 /** 예약 유형 (예약 탭) */

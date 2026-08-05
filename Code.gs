@@ -642,12 +642,20 @@ function sanitizeText_(v, maxLen) {
   return s;
 }
 
-/** http/https 링크만 허용 */
+/**
+ * http/https 링크만 허용합니다.
+ * 사진·파일을 여러 장 붙일 수 있도록, 줄바꿈으로 구분된 여러 개의 주소를 받습니다.
+ * (각 줄을 따로 검사하므로 이상한 값이 섞여 있으면 그 줄만 버립니다)
+ */
 function sanitizeUrl_(v) {
-  var s = String(v || '').trim();
-  if (!s) return '';
-  if (!/^https?:\/\//i.test(s)) return '';
-  return s.substring(0, 1000);
+  var raw = String(v || '').trim();
+  if (!raw) return '';
+  var list = raw.split(/[\r\n]+/)
+    .map(function (x) { return x.trim(); })
+    .filter(function (x) { return /^https?:\/\//i.test(x); })
+    .map(function (x) { return x.substring(0, 600); });
+  if (!list.length) return '';
+  return list.slice(0, 40).join('\n');   // 한 항목에 최대 40장
 }
 
 var URL_FIELDS = {
