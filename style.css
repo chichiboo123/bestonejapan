@@ -841,6 +841,42 @@ input:focus, select:focus, textarea:focus {
 
 .photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .photo-grid img { aspect-ratio: 1/1; object-fit: cover; border-radius: 10px; cursor: pointer; width: 100%; }
+
+/* 영상 칸 : 미리보기 그림 위에 ▶ 를 얹습니다 */
+.photo-cell {
+  position: relative; border-radius: 10px; overflow: hidden; cursor: pointer;
+  background: var(--surface-2);
+}
+.photo-cell img { border-radius: 0; }
+/* 미리보기 그림을 아직 못 만든 영상은 회색 칸으로 보이게 합니다 */
+.photo-cell img.thumb-fail { visibility: hidden; }
+.photo-cell.video::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(0,0,0,.05), rgba(0,0,0,.32));
+  pointer-events: none;
+}
+.video-play {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(16, 24, 40, .58); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none; z-index: 1;
+}
+.video-play .mi { font-size: 26px; }
+.video-tag {
+  position: absolute; left: 5px; bottom: 5px; z-index: 1;
+  background: rgba(16, 24, 40, .66); color: #fff;
+  border-radius: 6px; font-size: .62rem; font-weight: 800; padding: 2px 6px;
+  pointer-events: none;
+}
+
+/* 큰 화면에서 영상 재생 */
+.viewer-doc.video { background: #000; }
+.viewer-doc.video .viewer-doc-msg { color: rgba(255,255,255,.82); white-space: pre-wrap; }
+.viewer-inner .viewer-doc video {
+  width: 100%; height: 100%; max-height: 100%;
+  object-fit: contain; background: #000; display: block;
+}
 .photo-box {
   border: 2px dashed var(--line); border-radius: 12px; padding: 14px;
   text-align: center; color: var(--text-faint); font-size: .86rem;

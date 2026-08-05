@@ -367,6 +367,10 @@ function handleRequest_(req) {
       case 'deleteImage': return jsonOut_(apiDeleteImage_(req, ctx));
       case 'getFileData': return jsonOut_(apiGetFileData_(req, ctx));
 
+      /* ------- 큰 파일(영상) 나눠 올리기 ------- */
+      case 'uploadChunk':  return jsonOut_(apiUploadChunk_(req, ctx));
+      case 'finishUpload': return jsonOut_(apiFinishUpload_(req, ctx));
+
       /* ------- 일정에 예약 추가 ------- */
       case 'addReservationToSchedule': return jsonOut_(apiReservationToSchedule_(req, ctx));
 
@@ -1156,13 +1160,14 @@ function apiUploadImage_(req, ctx) {
     mimeType = m[1];
     base64 = m[2];
   }
-  var allowed = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'application/pdf': 1 };
-  if (!allowed[mimeType]) {
-    return fail_('BAD_MIME', '지원하지 않는 파일 형식입니다. (JPEG, PNG, WebP, PDF 만 가능)');
+  if (!isAllowedUploadMime_(mimeType)) {
+    return fail_('BAD_MIME', '지원하지 않는 파일 형식입니다. (JPEG, PNG, WebP, PDF, MP4, MOV, WebM 만 가능)');
   }
   // 대략적인 용량 제한 (base64 는 원본의 약 1.37배)
   if (base64.length > 12 * 1024 * 1024) {
-    return fail_('TOO_LARGE', '파일이 너무 큽니다. 더 작은 이미지를 선택해 주세요.');
+    return fail_('TOO_LARGE',
+      '한 번에 보내기에는 파일이 너무 큽니다. ' +
+      '영상처럼 큰 파일은 앱이 여러 조각으로 나눠 보냅니다(앱을 최신 버전으로 새로고침해 주세요).');
   }
 
   var name = sanitizeText_(req.name, 100) ||
@@ -1234,6 +1239,209 @@ function apiDeleteImage_(req, ctx) {
   return deleteEntity_('Photos', { id: target.id }, ctx);
 }
 
+/* ---------- 올릴 수 있는 파일 형식 ---------- */
+
+var UPLOAD_MIME_ = {
+  'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'image/heic': 1, 'image/heif': 1,
+  'application/pdf': 1,
+  // 영상 (휴대폰에서 찍은 영상은 대부분 mp4 또는 mov 입니다)
+  'video/mp4': 1, 'video/quicktime': 1, 'video/webm': 1, 'video/x-m4v': 1, 'video/3gpp': 1
+};
+
+function isAllowedUploadMime_(mimeType) {
+  return !!UPLOAD_MIME_[String(mimeType || '').toLowerCase()];
+}
+
+function isVideoMime_(mimeType) {
+  return String(mimeType || '').toLowerCase().indexOf('video/') === 0;
+}
+
+/** 영상 한 개의 최대 크기 (스크립트 속성 VIDEO_MAX_MB 로 조절할 수 있습니다) */
+function videoMaxBytes_() {
+  var mb = parseInt(prop_('VIDEO_MAX_MB', '20'), 10);
+  if (!mb || mb < 1) mb = 20;
+  if (mb > 60) mb = 60;          // 그 이상은 Apps Script 가 감당하지 못합니다
+  return mb * 1024 * 1024;
+}
+
+/* ============================================================
+ * 9-2. 큰 파일(영상) 나눠 올리기
+ * ------------------------------------------------------------
+ * 영상은 사진과 달리 압축을 할 수 없어서 원본 그대로 올라갑니다.
+ * 한 번에 보내면 요청이 너무 커져 실패하므로 조각으로 나눠 받고,
+ * 마지막에 하나로 합쳐 Drive 에 저장합니다.
+ *
+ *   uploadChunk  (조각마다 한 번씩)  →  finishUpload (마지막에 한 번)
+ *
+ * 조각은 Drive 의 "_업로드중" 폴더에 잠깐 보관했다가 합친 뒤 지웁니다.
+ * ========================================================== */
+
+/** 조각을 잠시 모아두는 폴더 */
+function getUploadTempFolder_() {
+  var parent = getDriveFolder_();
+  var name = '_업로드중';
+  var it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(name);
+}
+
+/**
+ * 조각 하나를 받습니다.
+ * 요청: { action:'uploadChunk', token, uploadId, index, total, base64 }
+ */
+function apiUploadChunk_(req, ctx) {
+  var uploadId = sanitizeText_(req.uploadId, 60);
+  if (!/^[A-Za-z0-9_-]{8,60}$/.test(uploadId)) return fail_('BAD_UPLOAD_ID', '업로드 번호가 올바르지 않습니다.');
+
+  var index = parseInt(req.index, 10);
+  var total = parseInt(req.total, 10);
+  if (isNaN(index) || index < 0 || isNaN(total) || total < 1 || total > 200 || index >= total) {
+    return fail_('BAD_CHUNK', '조각 번호가 올바르지 않습니다.');
+  }
+
+  var base64 = String(req.base64 || '');
+  if (!base64) return fail_('NO_DATA', '보낼 내용이 없습니다.');
+  if (base64.length > 4 * 1024 * 1024) return fail_('CHUNK_TOO_BIG', '조각이 너무 큽니다.');
+
+  try {
+    var folder = getUploadTempFolder_();
+    var partName = uploadId + '.' + padNum_(index, 3) + '.part';
+
+    // 같은 조각을 다시 보낸 경우(재시도) 예전 것을 지웁니다.
+    var old = folder.getFilesByName(partName);
+    while (old.hasNext()) old.next().setTrashed(true);
+
+    folder.createFile(Utilities.newBlob(base64, 'text/plain', partName));
+    return ok_({ uploadId: uploadId, index: index, received: base64.length }, '');
+  } catch (err) {
+    return fail_('CHUNK_FAILED', '조각을 저장하지 못했습니다: ' + (err && err.message ? err.message : err));
+  }
+}
+
+/**
+ * 모아둔 조각을 하나로 합쳐 Drive 에 저장하고 Photos 시트에 기록합니다.
+ * 요청: { action:'finishUpload', token, uploadId, total, mimeType, name, refType, refId, date }
+ */
+function apiFinishUpload_(req, ctx) {
+  var uploadId = sanitizeText_(req.uploadId, 60);
+  if (!/^[A-Za-z0-9_-]{8,60}$/.test(uploadId)) return fail_('BAD_UPLOAD_ID', '업로드 번호가 올바르지 않습니다.');
+
+  var total = parseInt(req.total, 10);
+  if (isNaN(total) || total < 1 || total > 200) return fail_('BAD_CHUNK', '조각 개수가 올바르지 않습니다.');
+
+  var mimeType = sanitizeText_(req.mimeType, 60) || 'video/mp4';
+  if (!isAllowedUploadMime_(mimeType)) {
+    return fail_('BAD_MIME', '지원하지 않는 파일 형식입니다.');
+  }
+
+  var temp = null;
+  try {
+    temp = getUploadTempFolder_();
+
+    // ---- 조각을 순서대로 이어 붙입니다 ----
+    var parts = [];
+    var totalChars = 0;
+    for (var i = 0; i < total; i++) {
+      var partName = uploadId + '.' + padNum_(i, 3) + '.part';
+      var it = temp.getFilesByName(partName);
+      if (!it.hasNext()) {
+        return fail_('MISSING_CHUNK', (i + 1) + '번째 조각이 도착하지 않았습니다. 다시 올려주세요.');
+      }
+      var txt = it.next().getBlob().getDataAsString();
+      totalChars += txt.length;
+      // base64 는 원본의 약 4/3 배입니다. 미리 막아 메모리 부족을 피합니다.
+      if (totalChars * 0.75 > videoMaxBytes_() * 1.05) {
+        cleanupUploadParts_(temp, uploadId, total);
+        return fail_('TOO_LARGE',
+          '파일이 너무 큽니다. ' + Math.round(videoMaxBytes_() / 1024 / 1024) + 'MB 이하로 잘라서 올려주세요.');
+      }
+      parts.push(txt);
+    }
+
+    var bytes = Utilities.base64Decode(parts.join(''));
+    parts = null;                                   // 메모리 정리
+
+    var name = sanitizeText_(req.name, 100) ||
+      ('bestone_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmmss'));
+
+    var folder = getDriveFolder_();
+    var file = folder.createFile(Utilities.newBlob(bytes, mimeType, name));
+    try {
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    } catch (shareErr) { /* 조직 정책 등으로 실패해도 파일은 저장됩니다 */ }
+
+    var fileId = file.getId();
+    var rec = {
+      id: Utilities.getUuid(),
+      tripId: prop_('TRIP_ID', 'trip-jp-001'),
+      fileId: fileId,
+      // 영상은 Drive 가 만들어 주는 미리보기 그림을 목록에 씁니다.
+      url: 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w1600',
+      viewUrl: 'https://drive.google.com/file/d/' + fileId + '/view',
+      name: name,
+      mimeType: mimeType,
+      size: bytes.length,
+      refType: sanitizeText_(req.refType, 40),
+      refId: sanitizeText_(req.refId, 60),
+      date: sanitizeText_(req.date, 10),
+      createdBy: ctx.nickname,
+      createdAt: new Date().toISOString(),
+      updatedBy: ctx.nickname,
+      updatedAt: new Date().toISOString(),
+      isDeleted: false,
+      isSample: false
+    };
+    appendObject_('Photos', rec);
+    logActivity_(ctx.nickname, 'UPLOAD', 'Photos', fileId + ' (' + mimeType + ')');
+
+    cleanupUploadParts_(temp, uploadId, total);
+    return ok_({ photo: rec }, isVideoMime_(mimeType) ? '영상이 업로드되었습니다.' : '파일이 업로드되었습니다.');
+
+  } catch (err) {
+    if (temp) cleanupUploadParts_(temp, uploadId, total);
+    return fail_('UPLOAD_FAILED', '업로드를 마치지 못했습니다: ' + (err && err.message ? err.message : err));
+  }
+}
+
+function padNum_(n, len) {
+  var s = String(n);
+  while (s.length < len) s = '0' + s;
+  return s;
+}
+
+function cleanupUploadParts_(folder, uploadId, total) {
+  try {
+    for (var i = 0; i < total; i++) {
+      var it = folder.getFilesByName(uploadId + '.' + padNum_(i, 3) + '.part');
+      while (it.hasNext()) it.next().setTrashed(true);
+    }
+  } catch (e) { /* 정리 실패는 무시합니다 */ }
+}
+
+/**
+ * ★ 업로드가 중간에 끊겨 남은 조각을 정리합니다. (가끔 직접 실행해 주세요)
+ * 하루가 지난 조각만 지우므로, 진행 중인 업로드는 건드리지 않습니다.
+ */
+function cleanupStaleUploads() {
+  var removed = 0;
+  try {
+    var folder = getUploadTempFolder_();
+    var cutoff = new Date().getTime() - 24 * 60 * 60 * 1000;
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var f = files.next();
+      if (f.getName().indexOf('.part') > 0 && f.getDateCreated().getTime() < cutoff) {
+        f.setTrashed(true); removed++;
+      }
+    }
+  } catch (e) {
+    Logger.log('정리 중 오류: ' + e.message);
+  }
+  var msg = '남아 있던 업로드 조각 ' + removed + '개를 정리했습니다.';
+  Logger.log(msg);
+  return msg;
+}
+
 /**
  * 첨부 파일(주로 PDF)의 내용을 직접 내려보냅니다.
  *
@@ -1269,18 +1477,41 @@ function apiGetFileData_(req, ctx) {
 
   var size = 0;
   try { size = file.getSize(); } catch (e2) { size = 0; }
-  // base64 로 바꾸면 약 1.37배가 되므로 넉넉잡아 제한합니다.
-  if (size > 18 * 1024 * 1024) {
-    return fail_('TOO_LARGE', '파일이 너무 커서 앱 안에서 열 수 없습니다. [새 탭에서 열기] 를 사용해 주세요.');
-  }
 
   var blob = file.getBlob();
+  var bytes = blob.getBytes();
+  var mimeType = blob.getContentType() || 'application/octet-stream';
+
+  // ---- 조각으로 나눠 받기 (영상처럼 큰 파일용) ----
+  // offset/length 를 주면 그 부분만 보냅니다. 주지 않으면 전체를 보냅니다.
+  var offset = parseInt(req.offset, 10);
+  var length = parseInt(req.length, 10);
+  var CHUNK_MAX = 3 * 1024 * 1024;      // 한 번에 보낼 수 있는 최대 크기
+
+  if (isNaN(offset) || offset < 0) offset = 0;
+  if (isNaN(length) || length <= 0) length = bytes.length - offset;
+  if (length > CHUNK_MAX) length = CHUNK_MAX;
+  if (offset + length > bytes.length) length = bytes.length - offset;
+  if (length < 0) length = 0;
+
+  // 전체를 한 번에 달라고 했는데 너무 크면, 조각으로 나눠 달라고 알려줍니다.
+  if (offset === 0 && length === bytes.length && bytes.length > CHUNK_MAX) {
+    length = CHUNK_MAX;
+  }
+
+  var part = (offset === 0 && length === bytes.length)
+    ? bytes
+    : bytes.slice(offset, offset + length);
+
   return ok_({
     fileId: fileId,
     name: file.getName(),
-    mimeType: blob.getContentType() || 'application/octet-stream',
-    size: size,
-    base64: Utilities.base64Encode(blob.getBytes())
+    mimeType: mimeType,
+    size: bytes.length,
+    offset: offset,
+    length: length,
+    done: (offset + length) >= bytes.length,
+    base64: Utilities.base64Encode(part)
   }, '');
 }
 

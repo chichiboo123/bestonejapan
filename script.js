@@ -1115,6 +1115,31 @@ function toEmbedUrl(url) {
   return s;
 }
 
+/** 이 기록이 영상인지 (Photos 시트의 mimeType 으로 판단) */
+function isVideoPhoto(p) {
+  return !!p && /^video\//i.test(String(p.mimeType || ''));
+}
+
+/**
+ * 목록에 보여줄 사진 · 영상 칸을 만듭니다.
+ * 영상은 Drive 가 만들어 준 미리보기 그림 위에 ▶ 표시를 얹습니다.
+ */
+function photoTile(p, onclick) {
+  const img = h('img', {
+    src: p.url, alt: p.name || (isVideoPhoto(p) ? '영상' : '사진'), loading: 'lazy',
+    onerror: function () { this.classList.add('thumb-fail'); }
+  });
+  if (!isVideoPhoto(p)) {
+    img.addEventListener('click', onclick);
+    return img;
+  }
+  return h('div', { class: 'photo-cell video', onclick: onclick }, [
+    img,
+    h('span', { class: 'video-play' }, mi('play_arrow')),
+    h('span', { class: 'video-tag', text: '영상' })
+  ]);
+}
+
 /** 여러 형태의 Drive 주소에서 파일 ID 만 뽑아냅니다 */
 function driveFileId(url) {
   const s = String(url || '');
@@ -1139,30 +1164,47 @@ const docBlobCache = {};
  *   그래서 문서가 검게 나오거나 잘려 보입니다.
  *   파일 내용만 받아와서 브라우저에 내장된 PDF 뷰어로 열면 이런 문제가 없습니다.
  */
-async function loadDocBlobUrl(url) {
+async function loadDocBlobUrl(url, onProgress) {
   const fileId = driveFileId(url);
   const key = fileId || url;
   if (docBlobCache[key]) return docBlobCache[key];
 
-  const data = await api('getFileData', fileId ? { fileId } : { url }, { timeout: 60000, retry: 0 });
-  if (!data || !data.base64) throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
+  // 큰 파일(영상 등)은 여러 조각으로 나눠 받습니다.
+  const target = fileId ? { fileId } : { url };
+  const parts = [];
+  let offset = 0, mimeType = '', guard = 0;
 
-  const bin = atob(data.base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: data.mimeType || 'application/pdf' }));
+  for (;;) {
+    const data = await api('getFileData', Object.assign({ offset }, target),
+      { timeout: 90000, retry: 0 });
+    if (!data || !data.base64) throw apiError('NO_DATA', '파일 내용을 받지 못했습니다.');
+
+    mimeType = data.mimeType || mimeType;
+    const bin = atob(data.base64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    parts.push(buf);
+
+    offset += (data.length || bin.length);
+    if (onProgress && data.size) onProgress(Math.min(offset / data.size, 1));
+    if (data.done || !data.size || offset >= data.size) break;
+    if (++guard > 60) throw apiError('TOO_LARGE', '파일이 너무 커서 앱 안에서 열 수 없습니다.');
+  }
+
+  const blobUrl = URL.createObjectURL(new Blob(parts, { type: mimeType || 'application/pdf' }));
   docBlobCache[key] = blobUrl;
   return blobUrl;
 }
 
 /** 클립보드·드래그로 들어온 항목에서 이미지/PDF 파일만 추려냅니다 */
-function extractFiles(dataTransfer) {
+function extractFiles(dataTransfer, allowVideo) {
   if (!dataTransfer) return [];
   const out = [];
   const seen = {};
   const push = file => {
     if (!file) return;
-    const ok = /^image\//.test(file.type) || file.type === 'application/pdf';
+    const ok = /^image\//.test(file.type) || file.type === 'application/pdf' ||
+      (allowVideo && /^video\//.test(file.type));
     if (!ok) return;
     const key = (file.name || '') + '|' + file.size + '|' + file.type;
     if (seen[key]) return;
@@ -1363,7 +1405,8 @@ function buildImageField(f, values, markDirty) {
  * 작성 중인 폼(바텀시트)을 덮어쓰지 않도록 별도의 겹침창으로 띄웁니다.
  */
 function pickExistingPhoto(onPick, keepOpen) {
-  const photos = S.photos.slice().reverse();
+  // 티켓 첨부 등에는 사진만 고를 수 있게 합니다(영상은 제외).
+  const photos = S.photos.filter(x => !isVideoPhoto(x)).reverse();
   if (!photos.length) { toast('저장된 사진이 없습니다.', 'error'); return; }
 
   const grid = h('div', { class: 'photo-grid' });
@@ -1692,11 +1735,35 @@ function openDrafts() {
  * - 1MB 이하가 되도록 품질을 낮춰가며 재시도
  * - PDF 는 압축 없이 그대로 전송
  */
+function isVideoFile(file) {
+  return !!file && /^video\//i.test(file.type || '');
+}
+
+/** 사람이 읽기 좋은 크기 표시 (예: 12.4MB) */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB';
+  if (n >= 1024) return Math.round(n / 1024) + 'KB';
+  return n + 'B';
+}
+
 function prepareUpload(file, onProgress) {
   const U = CFG.UPLOAD_CONFIG;
   return new Promise((resolve, reject) => {
     if (!file) return reject(new Error('파일이 없습니다.'));
-    if (file.size > 20 * 1024 * 1024) return reject(new Error('파일이 너무 큽니다(20MB 초과).'));
+
+    const isVideo = isVideoFile(file);
+    const maxVideo = U.VIDEO_MAX_BYTES || 20 * 1024 * 1024;
+
+    if (isVideo) {
+      if (file.size > maxVideo) {
+        return reject(new Error(
+          '영상이 너무 큽니다. (' + fmtBytes(file.size) + ' / 최대 ' + fmtBytes(maxVideo) + ')\n' +
+          '휴대폰 사진 앱에서 필요한 부분만 잘라낸 뒤 올려주세요.'));
+      }
+    } else if (file.size > 20 * 1024 * 1024) {
+      return reject(new Error('파일이 너무 큽니다(20MB 초과).'));
+    }
 
     const isPdf = file.type === 'application/pdf';
     const reader = new FileReader();
@@ -1704,6 +1771,17 @@ function prepareUpload(file, onProgress) {
     reader.onprogress = e => { if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total * 0.4); };
 
     reader.onload = () => {
+      // 영상은 압축할 수 없으므로 원본 그대로 보냅니다.
+      if (isVideo) {
+        if (onProgress) onProgress(1);
+        return resolve({
+          base64: String(reader.result),
+          mimeType: file.type || 'video/mp4',
+          name: file.name || ('video_' + Date.now() + '.mp4'),
+          isVideo: true,
+          bytes: file.size
+        });
+      }
       if (isPdf) {
         if (onProgress) onProgress(1);
         return resolve({
@@ -1754,6 +1832,80 @@ function prepareUpload(file, onProgress) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * 준비된 파일을 서버로 보냅니다.
+ *
+ * 작은 파일은 한 번에 보내고, 영상처럼 큰 파일은 조각으로 나눠 보냅니다.
+ * (한 번에 보내면 요청이 너무 커져서 도중에 끊기기 때문입니다)
+ *
+ * @param payload prepareUpload() 가 만든 값 + refType/refId/date
+ * @param onProgress 0~1 사이 진행률
+ * @returns 서버가 만든 photo 기록
+ */
+async function uploadPrepared(payload, onProgress) {
+  const U = CFG.UPLOAD_CONFIG;
+  const raw = String(payload.base64 || '');
+  // "data:video/mp4;base64,...." 에서 앞머리를 떼어냅니다.
+  const comma = raw.indexOf(',');
+  const body = (raw.slice(0, 5) === 'data:' && comma > 0) ? raw.slice(comma + 1) : raw;
+
+  const threshold = U.CHUNK_THRESHOLD || 3 * 1024 * 1024;
+  const meta = {
+    mimeType: payload.mimeType,
+    name: payload.name,
+    refType: payload.refType || '',
+    refId: payload.refId || '',
+    date: payload.date || ''
+  };
+
+  // ---- 작은 파일: 한 번에 ----
+  if (body.length <= threshold * 1.4) {
+    const data = await api('uploadImage',
+      Object.assign({ base64: payload.base64 }, meta),
+      { timeout: 90000, retry: 0 });
+    if (onProgress) onProgress(1);
+    return data.photo;
+  }
+
+  // ---- 큰 파일: 조각으로 나눠서 ----
+  // base64 는 4글자가 원본 3바이트이므로, 조각 크기를 4의 배수로 맞춥니다.
+  let chunkChars = Math.floor(((U.CHUNK_BYTES || 2 * 1024 * 1024) * 4 / 3) / 4) * 4;
+  if (chunkChars < 4) chunkChars = 4;
+
+  const total = Math.ceil(body.length / chunkChars);
+  if (total > 200) throw apiError('TOO_LARGE', '파일이 너무 커서 나눠 보낼 수 없습니다.');
+
+  const uploadId = 'up' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+
+  for (let i = 0; i < total; i++) {
+    const piece = body.slice(i * chunkChars, (i + 1) * chunkChars);
+    let lastErr = null;
+    // 네트워크가 불안정할 수 있으니 조각마다 두 번까지 다시 시도합니다.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await api('uploadChunk',
+          { uploadId, index: i, total, base64: piece },
+          { timeout: 90000, retry: 0 });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (err && err.code === 'INVALID_SESSION') throw err;
+        await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+      }
+    }
+    if (lastErr) throw lastErr;
+    // 마지막 합치는 단계를 위해 95% 까지만 채웁니다.
+    if (onProgress) onProgress((i + 1) / total * 0.95);
+  }
+
+  const data = await api('finishUpload',
+    Object.assign({ uploadId, total }, meta),
+    { timeout: 180000, retry: 0 });
+  if (onProgress) onProgress(1);
+  return data.photo;
 }
 
 /* =========================================================================
@@ -1854,18 +2006,48 @@ function attachGallery(value, alt) {
 }
 
 /** 여러 장을 좌우로 넘겨보는 전체 화면 뷰어 */
-function openGallery(urls, label, startIndex) {
+function openGallery(urls, label, startIndex, opts) {
   const list = parseUrls(urls);
   if (!list.length) return;
+  opts = opts || {};
   let idx = Math.min(Math.max(startIndex || 0, 0), list.length - 1);
   const inner = $('#viewerInner');
 
   function draw() {
     clear(inner);
     const url = list[idx];
-    const pdf = isPdfUrl(url);
+    const video = !!(opts.videos && opts.videos[idx]);
+    const pdf = !video && isPdfUrl(url);
 
-    if (pdf) {
+    if (video) {
+      // 영상은 Drive 화면을 빌리지 않고 파일을 직접 받아 재생합니다.
+      const wrap = h('div', { class: 'viewer-doc video' },
+        h('div', { class: 'viewer-doc-msg', text: '영상을 불러오는 중… 0%' }));
+      inner.appendChild(wrap);
+      inner.appendChild(h('div', { class: 'viewer-tools' },
+        iconBtn('open_in_new', '새 탭에서 열기', 'btn btn-sm btn-ghost',
+          e => { if (e) e.stopPropagation(); openExternal(opts.videos[idx].viewUrl || url); })));
+
+      const myIdx = idx;
+      const msg = $('.viewer-doc-msg', wrap);
+      loadDocBlobUrl(opts.videos[idx].viewUrl || url, pr => {
+        if (myIdx === idx && msg) msg.textContent = '영상을 불러오는 중… ' + Math.round(pr * 100) + '%';
+      }).then(blobUrl => {
+        if (myIdx !== idx) return;
+        clear(wrap);
+        wrap.appendChild(h('video', {
+          src: blobUrl, controls: true, playsinline: true, preload: 'metadata',
+          onclick: e => e.stopPropagation()
+        }));
+      }).catch(err => {
+        if (myIdx !== idx) return;
+        clear(wrap);
+        wrap.appendChild(h('div', { class: 'viewer-doc-msg' },
+          '영상을 불러오지 못했습니다.\n' + describeError(err) +
+          '\n아래 [새 탭에서 열기] 를 눌러주세요.'));
+      });
+
+    } else if (pdf) {
       // PDF 는 새 탭으로 나가지 않고 앱 안에서 바로 봅니다.
       // Drive 화면을 빌려 쓰지 않고 파일 내용을 받아와 브라우저 내장 뷰어로 엽니다.
       const frameWrap = h('div', { class: 'viewer-doc' },
@@ -3549,28 +3731,32 @@ function renderRecord() {
       ]));
       const grid = h('div', { class: 'photo-grid' });
       const urls = bundle.photos.map(p => p.url);
-      bundle.photos.forEach((p, i) => grid.appendChild(h('img', {
-        src: p.url, alt: p.name || '사진', loading: 'lazy', onclick: () => openGallery(urls, '사진', i)
-      })));
+      const videos = bundle.photos.map(p => isVideoPhoto(p) ? p : null);
+      bundle.photos.forEach((p, i) => grid.appendChild(
+        photoTile(p, () => openGallery(urls, isVideoPhoto(p) ? '영상' : '사진', i, { videos }))
+      ));
       nodes.push(grid);
     }
 
   } else if (S.recordTab === 'photo') {
+    const vCount = S.photos.filter(isVideoPhoto).length;
+    const pCount = S.photos.length - vCount;
     nodes.push(h('div', { class: 'section-head' }, [
-      h('h2', { class: 'section-title' }, [h('span', { class: 'dot' }), '사진 ' + S.photos.length + '장']),
+      h('h2', { class: 'section-title' }, [
+        h('span', { class: 'dot' }),
+        '사진 ' + pCount + '장' + (vCount ? ' · 영상 ' + vCount + '개' : '')
+      ]),
       iconBtn('add_photo_alternate', '업로드', 'btn btn-sm', openPhotoUpload)
     ]));
     if (S.photos.length) {
       const grid = h('div', { class: 'photo-grid' });
       S.photos.slice().reverse().forEach(p => {
-        grid.appendChild(h('img', {
-          src: p.url, alt: p.name || '사진', loading: 'lazy', onclick: () => openPhotoDetail(p)
-        }));
+        grid.appendChild(photoTile(p, () => openPhotoDetail(p)));
       });
       nodes.push(grid);
-      nodes.push(h('p', { class: 'faint tiny mt8', text: '사진은 Google Drive 에 저장되고, 시트에는 링크만 기록됩니다.' }));
+      nodes.push(h('p', { class: 'faint tiny mt8', text: '사진과 영상은 Google Drive 에 저장되고, 시트에는 링크만 기록됩니다.' }));
     } else {
-      nodes.push(emptyBox('업로드한 사진이 없습니다', '스마트폰에서 사진을 여러 장 골라 한 번에 올릴 수 있습니다.', 'photo_camera'));
+      nodes.push(emptyBox('업로드한 사진이 없습니다', '스마트폰에서 사진과 영상을 여러 개 골라 한 번에 올릴 수 있습니다.', 'photo_camera'));
     }
 
   } else if (S.recordTab === 'expense') {
@@ -3671,36 +3857,67 @@ function openPhotoUpload() {
   body.appendChild(dateRow);
 
   const zone = h('div', { class: 'attach-field', tabindex: '0' });
-  const fileInput = h('input', { type: 'file', accept: 'image/*,application/pdf', multiple: true, style: 'display:none' });
+  const fileInput = h('input', {
+    type: 'file', accept: 'image/*,video/*,application/pdf', multiple: true, style: 'display:none'
+  });
   const progress = h('div', { class: 'upload-progress hidden' }, h('i'));
+  const progressText = h('div', { class: 'hint hidden' });
   const result = h('div', { class: 'photo-grid mt8' });
 
   async function addFiles(files) {
     files = (files || []).filter(Boolean);
     if (!files.length) return;
     progress.classList.remove('hidden');
+    progressText.classList.remove('hidden');
     const bar = $('i', progress);
-    let ok = 0;
+    let ok = 0, videos = 0;
+
     for (let i = 0; i < files.length; i++) {
-      bar.style.width = Math.round((i / files.length) * 100) + '%';
+      const f = files[i];
+      const video = isVideoFile(f);
+      const base = i / files.length;
+      const step = 1 / files.length;
+      const label = (files.length > 1 ? '(' + (i + 1) + ' / ' + files.length + ') ' : '');
+      progressText.textContent = label + (video
+        ? '영상 올리는 중… ' + fmtBytes(f.size) + ' (조금 걸립니다)'
+        : '올리는 중…');
+
       try {
-        const payload = await prepareUpload(files[i]);
+        const payload = await prepareUpload(f, pr => {
+          bar.style.width = Math.round((base + pr * step * 0.15) * 100) + '%';
+        });
         payload.date = values.date;
         payload.refType = 'gallery';
-        const data = await api('uploadImage', payload, { timeout: 60000, retry: 0 });
-        S.photos.push(data.photo);
-        result.appendChild(h('img', {
-          src: data.photo.url, alt: '업로드한 사진',
-          onclick: () => openGallery([data.photo.url], '사진', 0)
-        }));
+
+        const photo = await uploadPrepared(payload, pr => {
+          bar.style.width = Math.round((base + (0.15 + pr * 0.85) * step) * 100) + '%';
+          if (video && pr < 1) {
+            progressText.textContent = label + '영상 올리는 중… ' + Math.round(pr * 100) + '%';
+          }
+        });
+
+        S.photos.push(photo);
+        result.appendChild(photoTile(photo, () => openPhotoDetail(photo)));
         ok++;
+        if (isVideoPhoto(photo)) videos++;
       } catch (err) {
-        toast('업로드 실패: ' + describeError(err), 'error', 4000);
+        toast((f.name || '파일') + ' 업로드 실패: ' + describeError(err), 'error', 5000);
       }
+      bar.style.width = Math.round(((i + 1) / files.length) * 100) + '%';
     }
-    bar.style.width = '100%';
-    setTimeout(() => { progress.classList.add('hidden'); bar.style.width = '0'; }, 500);
-    if (ok) toast(ok + '장을 올렸습니다.', 'ok');
+
+    setTimeout(() => {
+      progress.classList.add('hidden');
+      progressText.classList.add('hidden');
+      bar.style.width = '0';
+    }, 500);
+    if (ok) {
+      const photos = ok - videos;
+      const parts = [];
+      if (photos) parts.push('사진 ' + photos + '장');
+      if (videos) parts.push('영상 ' + videos + '개');
+      toast(parts.join(' · ') + '을(를) 올렸습니다.', 'ok');
+    }
     silentRefresh();
   }
 
@@ -3714,7 +3931,7 @@ function openPhotoUpload() {
   zone.addEventListener('focusin', claim);
   zone.addEventListener('mousedown', claim);
   zone.addEventListener('paste', e => {
-    const files = extractFiles(e.clipboardData);
+    const files = extractFiles(e.clipboardData, true);
     if (!files.length) return;
     e.preventDefault();
     addFiles(files);
@@ -3728,42 +3945,62 @@ function openPhotoUpload() {
     zone.classList.remove('drag-over');
   }));
   zone.addEventListener('drop', e => {
-    const files = extractFiles(e.dataTransfer);
+    const files = extractFiles(e.dataTransfer, true);
     if (files.length) addFiles(files);
   });
-  const zoneApi = { addFiles: addFiles, wrap: zone };
+  const zoneApi = { addFiles: addFiles, wrap: zone, allowVideo: true };
 
   zone.appendChild(h('button', {
     type: 'button', class: 'btn btn-primary btn-block',
-    text: '사진 여러 장 선택', onclick: () => fileInput.click()
+    text: '사진 · 영상 고르기', onclick: () => fileInput.click()
   }));
   zone.appendChild(fileInput);
   zone.appendChild(progress);
+  zone.appendChild(progressText);
   zone.appendChild(h('div', { class: 'photo-box mt8' },
     '여기에 끌어놓거나 Ctrl+V 로 붙여넣어도 올라갑니다.'));
   zone.appendChild(result);
   body.appendChild(zone);
-  body.appendChild(h('p', { class: 'faint tiny mt12', text: '사진은 긴 변 1600px 이하로 자동 압축된 뒤 Google Drive 에 저장됩니다.' }));
+  body.appendChild(h('p', { class: 'faint tiny mt12' },
+    '사진은 긴 변 1600px 이하로 자동 압축된 뒤 Google Drive 에 저장됩니다.\n' +
+    '영상은 압축 없이 원본 그대로 올라가며, 한 개당 ' +
+    fmtBytes(CFG.UPLOAD_CONFIG.VIDEO_MAX_BYTES) + ' 까지 올릴 수 있습니다. ' +
+    '더 긴 영상은 휴대폰 사진 앱에서 필요한 부분만 잘라낸 뒤 올려주세요.'));
 
-  openSheet('사진 업로드', body, [
+  openSheet('사진 · 영상 업로드', body, [
     h('button', { class: 'btn btn-ghost', text: '닫기', onclick: () => { closeSheet(true); renderRecord(); } })
   ]);
   claim();
 }
 
 function openPhotoDetail(p) {
+  const video = isVideoPhoto(p);
   const body = h('div');
-  body.appendChild(h('img', { src: p.url, alt: p.name || '사진', style: 'border-radius:12px;width:100%' }));
-  [['이름', p.name], ['날짜', p.date], ['올린 사람', p.createdBy]].forEach(x => {
+
+  if (video) {
+    // 미리보기 그림을 누르면 큰 화면에서 재생합니다.
+    body.appendChild(photoTile(p, () => openGallery([p.url], '영상', 0, { videos: [p] })));
+    body.appendChild(h('button', {
+      class: 'btn btn-primary btn-block mt8', text: '영상 재생',
+      onclick: () => openGallery([p.url], '영상', 0, { videos: [p] })
+    }));
+  } else {
+    body.appendChild(h('img', { src: p.url, alt: p.name || '사진', style: 'border-radius:12px;width:100%' }));
+  }
+
+  [['이름', p.name], ['종류', video ? '영상' : '사진'],
+   ['크기', p.size ? fmtBytes(p.size) : ''],
+   ['날짜', p.date], ['올린 사람', p.createdBy]].forEach(x => {
     const n = kv(x[0], x[1]); if (n) body.appendChild(n);
   });
-  openSheet('사진', body, [
+  openSheet(video ? '영상' : '사진', body, [
     h('button', { class: 'btn btn-ghost', text: '닫기', onclick: () => closeSheet(true) }),
     h('button', { class: 'btn btn-sm btn-ghost', text: '원본 열기', onclick: () => openExternal(p.viewUrl || p.url) }),
     h('button', {
       class: 'btn btn-danger', text: '삭제',
       onclick: async () => {
-        const yes = await confirmBox('사진 삭제', '이 사진을 삭제할까요?\nGoogle Drive 에서도 휴지통으로 이동합니다.', '삭제');
+        const yes = await confirmBox(video ? '영상 삭제' : '사진 삭제',
+          (video ? '이 영상을' : '이 사진을') + ' 삭제할까요?\nGoogle Drive 에서도 휴지통으로 이동합니다.', '삭제');
         if (!yes) return;
         try {
           await api('deleteImage', { id: p.id });
@@ -5054,7 +5291,7 @@ function bindGlobalEvents() {
   // (글자를 붙여넣을 때는 파일이 없으므로 그대로 통과시킵니다)
   document.addEventListener('paste', e => {
     if (!activeAttachField) return;
-    const files = extractFiles(e.clipboardData);
+    const files = extractFiles(e.clipboardData, !!activeAttachField.allowVideo);
     if (!files.length) return;
     e.preventDefault();
     activeAttachField.addFiles(files);
