@@ -213,7 +213,7 @@ function describeError(err) {
   if (err.code === 'NETWORK') {
     return !navigator.onLine
       ? '인터넷에 연결되어 있지 않습니다. 연결 후 다시 시도해 주세요.'
-      : '서버에 연결하지 못했습니다. (Failed to fetch)\nApps Script 배포 주소와 "액세스 권한: 모든 사용자" 설정을 확인해 주세요.';
+      : '서버에 연결하지 못했습니다. (Failed to fetch / CORS)\nApps Script 배포 설정 문제일 가능성이 높습니다.';
   }
   if (err.code === 'BAD_RESPONSE') {
     return '서버가 올바른 응답을 주지 않았습니다. Apps Script 를 새 버전으로 다시 배포했는지 확인해 주세요.';
@@ -430,6 +430,7 @@ function showLogin() {
   $('#app').classList.add('hidden');
   $('#loginScreen').classList.remove('hidden');
   $('#loginMsg').textContent = '';
+  $('#loginHelp').classList.add('hidden');
   const btn = $('#loginBtn');
   btn.disabled = false;
   $('.btn-text', btn).textContent = '여행 시작하기';
@@ -474,6 +475,52 @@ function selectedNickname() {
   return chip ? chip.dataset.nick : '';
 }
 
+/**
+ * 로그인 실패 원인별 해결 방법을 화면에 직접 보여줍니다.
+ *
+ * CORS 오류("No 'Access-Control-Allow-Origin' header")는 거의 항상
+ * Apps Script 웹 앱의 "액세스 권한이 있는 사용자"가 "모든 사용자"가 아니어서
+ * 구글 로그인 페이지로 리디렉션되기 때문에 생깁니다.
+ * 리디렉션된 로그인 페이지에는 CORS 헤더가 없어 브라우저가 응답을 막습니다.
+ */
+function renderLoginHelp(err) {
+  const box = $('#loginHelp');
+  clear(box);
+  const code = err && err.code;
+
+  if (code !== 'NETWORK' && code !== 'BAD_RESPONSE' && code !== 'NO_API_URL') {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+
+  if (code === 'NO_API_URL') {
+    box.appendChild(h('h3', { text: 'config.js 설정이 필요합니다' }));
+    box.appendChild(h('p', { text: 'config.js 파일의 API_URL 에 Apps Script 웹 앱 주소(.../exec)를 넣고 GitHub 에 다시 올려주세요.' }));
+    return;
+  }
+
+  box.appendChild(h('h3', { text: '이렇게 해결하세요' }));
+  const ol = h('ol');
+  [
+    'Apps Script 편집기에서 오른쪽 위 [배포] → [배포 관리] 를 엽니다.',
+    '연필(✏️) 아이콘을 누릅니다.',
+    '"액세스 권한이 있는 사용자" 를 반드시 [모든 사용자] 로 바꿉니다.',
+    '"버전" 을 [새 버전] 으로 바꾼 뒤 [배포] 를 누릅니다.',
+    '아래 버튼으로 주소를 열어 JSON 이 보이는지 확인한 뒤 다시 로그인하세요.'
+  ].forEach(t => ol.appendChild(h('li', { text: t })));
+  box.appendChild(ol);
+
+  box.appendChild(h('button', {
+    type: 'button', class: 'btn btn-sm btn-block',
+    text: '웹 앱 주소 새 탭에서 열어보기',
+    onclick: () => openExternal(API.API_URL)
+  }));
+  box.appendChild(h('p', { class: 'tiny', style: 'margin-top:8px;color:var(--text-faint)' },
+    '열었을 때 {"success":true...} 같은 JSON 이 보이면 배포는 정상입니다. ' +
+    '구글 로그인 화면이나 "액세스 권한이 없습니다" 가 보이면 3번 설정이 잘못된 것입니다.'));
+}
+
 async function doLogin(e) {
   if (e) e.preventDefault();
   const msg = $('#loginMsg');
@@ -483,6 +530,7 @@ async function doLogin(e) {
   const tripCode = $('#loginTripCode').value.trim();
 
   msg.className = 'login-msg';
+  $('#loginHelp').classList.add('hidden');
   if (!password) { msg.textContent = '비밀번호를 입력해 주세요.'; return; }
   if (!nickname) { msg.textContent = '사용자를 선택하거나 닉네임을 입력해 주세요.'; return; }
 
@@ -513,6 +561,7 @@ async function doLogin(e) {
   } catch (err) {
     msg.className = 'login-msg';
     msg.textContent = describeError(err);
+    renderLoginHelp(err);
   } finally {
     btn.disabled = false;
     $('.btn-text', btn).textContent = '여행 시작하기';

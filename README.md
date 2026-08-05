@@ -647,16 +647,48 @@ Your site is live at https://사용자이름.github.io/bestonejapan/
 5. 회사·학교 네트워크에서 `script.google.com` 이 차단된 경우가 있습니다. 다른 네트워크로 시도해 보세요.
 </details>
 
-<details>
-<summary><b>CORS 오류 (Access-Control-Allow-Origin ...)</b></summary>
+<details open>
+<summary><b>CORS 오류 (No 'Access-Control-Allow-Origin' header is present)</b> ★가장 많이 발생★</summary>
 
-이 앱은 preflight 가 생기지 않도록 만들어져 있어 보통은 나지 않습니다.
-그래도 난다면:
+브라우저 콘솔에 이런 메시지가 보이는 경우입니다.
 
-1. Apps Script 코드를 임의로 수정해 `setHeader` 등을 추가하지 않았는지 확인하세요.
-   (Apps Script 는 응답 헤더를 직접 설정할 수 없습니다)
-2. `Code.gs` 를 원본 그대로 다시 붙여 넣고 **새 버전으로 재배포**하세요.
-3. 브라우저 확장 프로그램(광고 차단기 등)을 끄고 다시 시도해 보세요.
+```
+Access to fetch at 'https://script.google.com/macros/s/.../exec'
+from origin 'https://사용자이름.github.io' has been blocked by CORS policy:
+No 'Access-Control-Allow-Origin' header is present on the requested resource.
+```
+
+**원인은 앱 코드가 아니라 Apps Script 배포 설정입니다.**
+
+웹 앱의 **"액세스 권한이 있는 사용자"** 가 `모든 사용자` 가 아니면,
+Google 은 요청을 **구글 로그인 페이지로 리디렉션**합니다.
+그 로그인 페이지에는 CORS 헤더가 없기 때문에 브라우저가 응답을 막고
+위 메시지를 띄웁니다. (앱은 preflight 가 생기지 않는 방식으로 요청하므로
+`Content-Type` 이나 헤더 문제는 아닙니다)
+
+**해결 순서**
+
+1. Apps Script 편집기 오른쪽 위 **`배포`** → **`배포 관리`** 를 엽니다.
+2. 현재 배포 오른쪽의 **연필(✏️)** 아이콘을 누릅니다.
+3. **`액세스 권한이 있는 사용자`** 를 **`모든 사용자`** 로 바꿉니다.
+   → `나만`, `Google 계정이 있는 모든 사용자` 로 되어 있으면 반드시 실패합니다.
+4. **`버전`** 을 **`새 버전`** 으로 바꾸고 **`배포`** 를 누릅니다.
+5. 웹 앱 주소(`.../exec`)를 **브라우저 새 탭에 직접 붙여 넣어** 확인합니다.
+   * `{"success":true, ...}` JSON 이 보이면 → 설정 정상
+   * 구글 로그인 화면이나 "액세스 권한이 없습니다" 가 보이면 → 3번이 아직 잘못된 것
+
+> 앱 로그인 화면에서 이 오류가 나면 **[웹 앱 주소 새 탭에서 열어보기]** 버튼이
+> 자동으로 나타납니다. 그 버튼으로 5번을 바로 확인할 수 있습니다.
+
+**그래도 안 되면**
+
+* `config.js` 의 `API_URL` 이 `/exec` 로 끝나는지 확인하세요. (`/dev` 는 CORS 가 안 됩니다)
+* `배포 관리` 에서 **활성(Active)** 상태인 배포의 주소인지 확인하세요.
+  보관 처리된 배포 주소는 오류 페이지를 돌려주고, 그 페이지에도 CORS 헤더가 없습니다.
+* `Code.gs` 에 문법 오류가 있으면 Google 이 HTML 오류 페이지를 돌려주어 같은 증상이 납니다.
+  편집기에서 저장이 정상적으로 되는지 확인하세요.
+* Apps Script 는 응답 헤더를 직접 설정할 수 없습니다.
+  `setHeader` 같은 코드를 넣어 해결하려 하지 마세요.
 </details>
 
 <details>

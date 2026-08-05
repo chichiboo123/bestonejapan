@@ -160,33 +160,64 @@ a { color: var(--sky-deep); }
 /* ---------- 4. 로그인 화면 ---------- */
 .login-screen {
   position: fixed; inset: 0;
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: column; align-items: center;
   background: linear-gradient(180deg, #101a2f 0%, #1b2a4a 46%, #2f3f5f 100%);
   overflow-y: auto;
   z-index: 60;
 }
+
+/* 화면이 넓어도 입력창이 가로로 늘어나지 않도록 가운데 기둥으로 묶습니다 */
+.login-panel {
+  width: 100%;
+  max-width: 480px;
+  flex: 1 0 auto;
+  display: flex; flex-direction: column;
+}
+
 .login-sky {
-  position: relative; height: 44vh; min-height: 240px; max-height: 420px; flex: none;
+  position: relative; flex: none;
+  width: 100%;
   overflow: hidden;
+  background: #101a2f;
 }
 .login-sky::after {
-  /* 일러스트 아래쪽을 로그인 카드 배경(--bg)과 자연스럽게 이어줍니다 */
-  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 40%;
-  background: linear-gradient(180deg, rgba(16,26,47,0) 0%, rgba(16,26,47,.55) 78%, var(--bg) 100%);
+  /* 일러스트 아래쪽을 로그인 카드와 부드럽게 이어줍니다 */
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 26%;
+  background: linear-gradient(180deg, rgba(16,26,47,0), rgba(16,26,47,.45));
   pointer-events: none;
 }
+/* 일러스트 원본 비율(16:9)을 그대로 살려 잘리는 부분 없이 전체를 보여줍니다 */
 .login-art {
-  display: block; width: 100%; height: 100%;
-  object-fit: cover; object-position: 50% 58%;
+  display: block;
+  width: 100%; height: auto;
 }
 
 .login-card {
   flex: 1;
-  margin-top: -24px;
+  position: relative;
+  margin-top: -22px;
   background: var(--bg);
-  border-radius: 28px 28px 0 0;
-  padding: 26px 22px calc(34px + env(safe-area-inset-bottom));
+  border-radius: 26px 26px 0 0;
+  padding: 24px 20px calc(34px + env(safe-area-inset-bottom));
   box-shadow: 0 -8px 30px rgba(0,0,0,.25);
+}
+
+/* 태블릿 · PC : 가운데에 떠 있는 카드 형태로 */
+@media (min-width: 640px) {
+  .login-screen { padding: 28px 20px; }
+  .login-panel {
+    flex: 0 0 auto;
+    margin: auto 0;              /* 세로 가운데 정렬 (내용이 길어도 잘리지 않음) */
+    border-radius: 22px;
+    overflow: hidden;
+    box-shadow: 0 26px 70px rgba(0, 0, 0, .45);
+  }
+  .login-card {
+    flex: 0 0 auto;
+    border-radius: 22px 22px 0 0;
+    padding: 24px 26px 30px;
+    box-shadow: none;
+  }
 }
 .brand { text-align: center; margin-bottom: 22px; display: block; }
 .brand-main {
@@ -258,6 +289,25 @@ input:focus, select:focus, textarea:focus {
   margin-top: 18px; text-align: center;
   font-size: .78rem; color: var(--text-faint); line-height: 1.7;
 }
+
+/* 로그인 실패 시 해결 방법 안내 */
+.login-help {
+  margin-top: 12px;
+  background: rgba(201, 111, 74, .1);
+  border: 1px solid rgba(201, 111, 74, .32);
+  border-radius: 14px;
+  padding: 13px 15px;
+  font-size: .82rem;
+  line-height: 1.75;
+  color: var(--text);
+  text-align: left;
+}
+.login-help h3 {
+  font-size: .86rem; font-weight: 800; margin-bottom: 6px; color: var(--rose);
+}
+.login-help ol { margin: 0; padding-left: 18px; list-style: decimal; }
+.login-help li { margin-bottom: 3px; }
+.login-help .btn { margin-top: 10px; }
 
 /* ---------- 5. 앱 레이아웃 ---------- */
 .app { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
