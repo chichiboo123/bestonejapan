@@ -1453,3 +1453,20 @@ body.sheet-open .toast-wrap {
 @media print {
   .tabbar, .app-header, .sync-bar, .fab, .sidebar { display: none !important; }
 }
+
+/* =========================================================================
+ * 움직임을 줄이도록 설정한 사람 배려
+ * -------------------------------------------------------------------------
+ * 운영체제에서 "동작 줄이기 / 모션 감소" 를 켠 분에게는
+ * 회전 · 반짝임 같은 애니메이션을 멈춥니다. (어지럼증 · 멀미 예방)
+ * ========================================================================= */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .loading-planet { animation: none !important; }
+  .sk-line { animation: none !important; background: var(--surface-2) !important; }
+}
