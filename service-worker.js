@@ -8,7 +8,7 @@
  *   그러면 브라우저가 새 파일을 다시 받아옵니다.
  * ========================================================================= */
 
-const CACHE_VERSION = 'v12';
+const CACHE_VERSION = 'v13';
 const SHELL_CACHE = 'bestone-shell-' + CACHE_VERSION;
 const DATA_CACHE  = 'bestone-media-' + CACHE_VERSION;
 
@@ -61,10 +61,11 @@ self.addEventListener('fetch', event => {
 
   const url = new URL(req.url);
 
-  // Apps Script API / AI(제미나이) API 는 절대 캐시하지 않습니다(항상 최신 데이터).
+  // Apps Script API / AI(제미나이) / 날씨 API 는 절대 캐시하지 않습니다(항상 최신 정보).
   if (url.hostname.indexOf('script.google.com') >= 0 ||
       url.hostname.indexOf('script.googleusercontent.com') >= 0 ||
-      url.hostname.indexOf('generativelanguage.googleapis.com') >= 0) {
+      url.hostname.indexOf('generativelanguage.googleapis.com') >= 0 ||
+      url.hostname.indexOf('open-meteo.com') >= 0) {
     return;
   }
 

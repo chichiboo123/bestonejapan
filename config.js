@@ -57,7 +57,10 @@ const AI_CONFIG = {
 
   /**
    * 사용할 모델을 "먼저 쓸 것부터" 적어주세요.
-   * 앞의 모델이 없거나(404) 사용량이 꽉 차면(429/503) 자동으로 다음 모델로 넘어갑니다.
+   *
+   * 앱은 먼저 "지금 이 키로 실제 쓸 수 있는 모델 목록"을 확인한 뒤,
+   * 아래 목록 중 존재하는 것만 순서대로 시도합니다.
+   * 없는 이름은 두드려 보지도 않으므로 미리 적어두어도 손해가 없습니다.
    *
    * 우선순위: 앱에서 고른 순서 > 스크립트 속성 GEMINI_MODELS > 아래 기본값
    *
@@ -67,15 +70,15 @@ const AI_CONFIG = {
    *   (그렇게 고른 목록은 브라우저에 저장되어 이 기본값보다 우선합니다)
    */
   MODELS: [
-    // 요청하신 순서
-    'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite',
-    'gemini-3.5-flash',
-    'gemini-3.6-flash',
-    'gemini-2.5-flash-lite',
-    // ↓ 위 이름들이 아직 없을 때를 대비한 안전망 (지금 실제로 있는 이름들)
+    // "-latest" 는 구글이 모델 이름을 바꿔도 그대로 남기 때문에 가장 안전합니다.
+    'gemini-flash-lite-latest',
+    'gemini-flash-latest',
     'gemini-2.5-flash',
-    'gemini-2.0-flash'
+    'gemini-2.0-flash-lite',
+    'gemini-2.0-flash',
+    // ↓ 아직 없는 이름들. 나중에 생기면 자동으로 먼저 쓰이게 됩니다.
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite'
   ],
 
   /** 구글 검색으로 최신 정보를 찾아 답하도록 할지 (지원하지 않는 모델이면 자동으로 꺼집니다) */
@@ -87,6 +90,22 @@ const AI_CONFIG = {
 
   /** 대화에 함께 보낼 최근 주고받은 횟수 */
   HISTORY_TURNS: 8
+};
+
+/* ------------------------------------------------------------------
+ * 1-3) 날씨 설정
+ * ------------------------------------------------------------------
+ * Open-Meteo 를 사용합니다. API 키가 필요 없고 무료입니다.
+ * (https://open-meteo.com - 비상업적 사용 무료)
+ * ---------------------------------------------------------------- */
+const WEATHER_CONFIG = {
+  API_BASE: 'https://api.open-meteo.com/v1/forecast',
+
+  /** 몇 분마다 새로 받아올지 */
+  REFRESH_MIN: 15,
+
+  /** 응답 제한 시간 */
+  TIMEOUT_MS: 12000
 };
 
 /* ------------------------------------------------------------------
@@ -111,6 +130,16 @@ const COUNTRY_CONFIG = {
     transit: '노선 · 길찾기',
     routes: '이동 경로'
   },
+
+  /**
+   * 오늘 화면 맨 위에 날씨를 보여줄 도시들.
+   * 위도(lat) · 경도(lon) 는 https://www.latlong.net 등에서 찾을 수 있습니다.
+   * 다른 나라 버전에서는 이 목록만 바꾸면 됩니다.
+   */
+  weatherCities: [
+    { key: 'tokyo',   label: '도쿄',   lat: 35.6895, lon: 139.6917 },
+    { key: 'sapporo', label: '삿포로', lat: 43.0621, lon: 141.3544 }
+  ],
 
   /** 긴급 연락처 (오프라인에서도 보이도록 앱에 내장) */
   emergency: [
@@ -238,22 +267,12 @@ const UPLOAD_CONFIG = {
   VIDEO_MIME: ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/3gpp']
 };
 
-/** 오늘 화면에 보여줄 대표 문구 (날짜에 따라 순환) */
-const DAILY_QUOTES = [
-  '가장 중요한 것은 눈에 보이지 않아.',
-  '네가 오후 네 시에 온다면, 나는 세 시부터 행복해지기 시작할 거야.',
-  '사막이 아름다운 건 어딘가에 샘을 숨기고 있기 때문이야.',
-  '길들인다는 건 관계를 맺는 거야.',
-  '별들이 아름다운 건 보이지 않는 꽃 한 송이 때문이야.',
-  '어른들은 누구나 처음엔 어린이였다. 그것을 기억하는 어른은 별로 없지만.',
-  '내 비밀은 이거야. 마음으로 보아야 잘 보인다는 거.',
-  '오늘 하루도 우리만의 별에 이야기를 하나 더 얹는 날.'
-];
 
 /* 다른 파일에서 쓸 수 있도록 전역으로 노출 */
 window.BESTONE_CONFIG = {
   API_CONFIG,
   AI_CONFIG,
+  WEATHER_CONFIG,
   COUNTRY_CONFIG,
   USER_PRESETS,
   DEFAULT_TRIP_CODE,
@@ -263,6 +282,5 @@ window.BESTONE_CONFIG = {
   WORD_CATEGORIES,
   TRANSPORT_OPTIONS,
   RECORD_COLORS,
-  UPLOAD_CONFIG,
-  DAILY_QUOTES
+  UPLOAD_CONFIG
 };

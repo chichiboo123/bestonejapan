@@ -23,6 +23,9 @@ const TABS = [
 const S = {
   token: null,
   me: '',
+  weather: null,          // 마지막으로 받아온 날씨
+  weatherBusy: false,
+  weatherError: '',
   trip: {},
   members: [],
   schedules: [], scheduleComments: [], reservations: [], flights: [], accommodations: [],
@@ -120,7 +123,7 @@ function tokyoNowParts() {
   const t = new Date(utc + TZ_OFFSET_HOURS * 3600000);
   return {
     y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate(),
-    hh: t.getHours(), mm: t.getMinutes(), dow: t.getDay(), date: t
+    hh: t.getHours(), mm: t.getMinutes(), ss: t.getSeconds(), dow: t.getDay(), date: t
   };
 }
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -2128,11 +2131,209 @@ function findNextSchedule() {
   return best ? { item: best, at: bestT } : null;
 }
 
-function quoteOfDay(date) {
-  const q = CFG.DAILY_QUOTES;
-  const p = String(date || todayStr()).split('-');
-  const n = (Number(p[2]) || 1) + (Number(p[1]) || 1);
-  return q[n % q.length];
+/* =========================================================================
+ * 9-1. 날씨 (Open-Meteo · API 키가 필요 없습니다)
+ * -------------------------------------------------------------------------
+ * 오늘 화면 맨 위에 도쿄 · 삿포로의 지금 날씨를 보여줍니다.
+ * 인터넷이 없으면 마지막으로 받아둔 값을 보여줍니다.
+ * ========================================================================= */
+
+const WX = CFG.WEATHER_CONFIG || {};
+const WX_CACHE_KEY = 'weather';
+
+/** WMO 날씨 코드 → 우리말 설명과 아이콘 */
+const WX_CODES = {
+  0:  ['맑음',           'clear_day'],
+  1:  ['대체로 맑음',    'clear_day'],
+  2:  ['구름 조금',      'partly_cloudy_day'],
+  3:  ['흐림',           'cloud'],
+  45: ['안개',           'foggy'],
+  48: ['짙은 안개',      'foggy'],
+  51: ['이슬비',         'rainy'],
+  53: ['이슬비',         'rainy'],
+  55: ['강한 이슬비',    'rainy'],
+  56: ['어는 이슬비',    'rainy'],
+  57: ['어는 이슬비',    'rainy'],
+  61: ['약한 비',        'rainy'],
+  63: ['비',             'rainy'],
+  65: ['강한 비',        'rainy'],
+  66: ['어는 비',        'rainy'],
+  67: ['어는 비',        'rainy'],
+  71: ['약한 눈',        'weather_snowy'],
+  73: ['눈',             'weather_snowy'],
+  75: ['많은 눈',        'weather_snowy'],
+  77: ['싸락눈',         'weather_snowy'],
+  80: ['소나기',         'rainy'],
+  81: ['소나기',         'rainy'],
+  82: ['강한 소나기',    'rainy'],
+  85: ['소낙눈',         'weather_snowy'],
+  86: ['소낙눈',         'weather_snowy'],
+  95: ['천둥번개',       'thunderstorm'],
+  96: ['우박 · 천둥',    'thunderstorm'],
+  99: ['우박 · 천둥',    'thunderstorm']
+};
+
+function wxInfo(code) {
+  return WX_CODES[Number(code)] || ['-', 'help'];
+}
+
+/** 밤에는 해 아이콘 대신 달 아이콘을 씁니다 */
+function wxIcon(code, isDay) {
+  const icon = wxInfo(code)[1];
+  if (isDay === 0 || isDay === false) {
+    if (icon === 'clear_day') return 'bedtime';
+    if (icon === 'partly_cloudy_day') return 'partly_cloudy_night';
+  }
+  return icon;
+}
+
+function wxTemp(v) {
+  return (v === null || v === undefined || isNaN(v)) ? '-' : Math.round(v) + '°';
+}
+
+/**
+ * 도쿄 · 삿포로 날씨를 한 번에 받아옵니다.
+ * Open-Meteo 는 위도 · 경도를 쉼표로 이어 여러 도시를 한 번에 물어볼 수 있습니다.
+ */
+async function fetchWeather() {
+  const cities = (CO.weatherCities || []);
+  if (!cities.length) return null;
+
+  const params = new URLSearchParams({
+    latitude: cities.map(c => c.lat).join(','),
+    longitude: cities.map(c => c.lon).join(','),
+    current: 'temperature_2m,apparent_temperature,weather_code,is_day',
+    daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+    timezone: CO.timezone || 'Asia/Tokyo',
+    forecast_days: '1'
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WX.TIMEOUT_MS || 12000);
+  let json;
+  try {
+    const res = await fetch(WX.API_BASE + '?' + params.toString(), {
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    json = await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // 도시가 하나면 객체, 여럿이면 배열로 옵니다.
+  const arr = Array.isArray(json) ? json : [json];
+  const list = cities.map((c, i) => {
+    const d = arr[i] || {};
+    const cur = d.current || {};
+    const day = d.daily || {};
+    return {
+      key: c.key,
+      label: c.label,
+      temp: cur.temperature_2m,
+      feels: cur.apparent_temperature,
+      code: cur.weather_code,
+      isDay: cur.is_day,
+      max: (day.temperature_2m_max || [])[0],
+      min: (day.temperature_2m_min || [])[0],
+      pop: (day.precipitation_probability_max || [])[0]
+    };
+  }).filter(x => x.temp !== undefined && x.temp !== null);
+
+  if (!list.length) throw new Error('날씨 정보를 받지 못했습니다.');
+  return { at: new Date().toISOString(), list: list };
+}
+
+/** 날씨를 새로 받아옵니다. 실패하면 저장해 둔 값을 그대로 씁니다. */
+async function refreshWeather(force) {
+  if (S.weatherBusy) return;
+  const cached = S.weather || lsGet(WX_CACHE_KEY, null);
+  if (cached && !S.weather) S.weather = cached;
+
+  if (!force && cached && cached.at) {
+    const age = Date.now() - new Date(cached.at).getTime();
+    if (age < (WX.REFRESH_MIN || 15) * 60000) return;   // 아직 충분히 최신입니다
+  }
+  if (!navigator.onLine) return;
+
+  S.weatherBusy = true;
+  try {
+    const data = await fetchWeather();
+    if (data) {
+      S.weather = data;
+      lsSet(WX_CACHE_KEY, data);
+      S.weatherError = '';
+    }
+  } catch (err) {
+    S.weatherError = describeError(err);
+  } finally {
+    S.weatherBusy = false;
+  }
+  if (S.tab === 'today') paintWeather();
+}
+
+/** 지금 어느 도시에 있는지 (여행 도시 이름과 맞춰봅니다) */
+function currentCityKey() {
+  const name = String(S.trip.city || '');
+  const hit = (CO.weatherCities || []).filter(c => name.indexOf(c.label) >= 0)[0];
+  return hit ? hit.key : '';
+}
+
+/** 히어로 안의 날씨 줄을 그립니다 (히어로 전체를 다시 그리지 않도록 따로 뺐습니다) */
+function paintWeather() {
+  const box = $('#heroWeather');
+  if (!box) return;
+  clear(box);
+
+  const data = S.weather;
+  if (!data || !data.list || !data.list.length) {
+    box.appendChild(h('div', { class: 'wx-loading', text: S.weatherError ? '날씨를 불러오지 못했습니다' : '날씨를 불러오는 중…' }));
+    return;
+  }
+
+  const here = currentCityKey();
+  data.list.forEach(w => {
+    const info = wxInfo(w.code);
+    box.appendChild(h('div', { class: 'wx-chip' + (w.key === here ? ' here' : '') }, [
+      mi(wxIcon(w.code, w.isDay), 'wx-ico'),
+      h('div', { class: 'wx-body' }, [
+        h('div', { class: 'wx-top' }, [
+          h('span', { class: 'wx-city', text: w.label }),
+          h('span', { class: 'wx-temp', text: wxTemp(w.temp) })
+        ]),
+        h('div', { class: 'wx-sub', text:
+          info[0] +
+          ((w.min !== undefined && w.max !== undefined)
+            ? ' ' + Math.round(w.min) + '/' + Math.round(w.max) + '°' : '') +
+          ((w.pop !== undefined && w.pop !== null && w.pop > 0) ? ' · 비 ' + w.pop + '%' : '')
+        })
+      ])
+    ]));
+  });
+
+  // 새로고침 버튼은 히어로 구석에 붙입니다 (날씨 칸 자리를 뺏지 않도록)
+  const hero = box.parentNode;
+  if (hero) {
+    const old = $('.wx-refresh', hero);
+    if (old) old.remove();
+    const at = new Date(data.at);
+    hero.appendChild(h('button', {
+      class: 'wx-refresh icon-btn', 'aria-label': '날씨 새로고침',
+      title: '기준 ' + pad2(at.getHours()) + ':' + pad2(at.getMinutes()) + ' · 눌러서 새로고침',
+      onclick: () => { S.weatherError = ''; refreshWeather(true); }
+    }, mi('refresh')));
+  }
+}
+
+/** 히어로의 시계를 1초마다 갱신합니다 */
+function paintClock() {
+  const el = $('#heroClock');
+  if (!el) return;
+  const p = tokyoNowParts();
+  el.textContent = pad2(p.hh) + ':' + pad2(p.mm);
+  const sec = $('#heroSec');
+  if (sec) sec.textContent = pad2(p.ss);
 }
 
 function renderToday() {
@@ -2162,10 +2363,22 @@ function renderToday() {
     else if (dayIdx >= 0) dday = '여행 ' + (dayIdx + 1) + '일차 / ' + dates.length + '일';
     else if (S.trip.endDate && diffDays(S.trip.endDate, date) > 0) dday = '여행이 끝났습니다. 기록을 정리해 보세요.';
   }
+  const p = tokyoNowParts();
   nodes.push(h('div', { class: 'today-hero' }, [
-    h('div', { class: 't-date', text: fmtDateFull(date) + ' · ' + CO.nameKo + ' 시간 ' + nowTimeStr() }),
-    h('div', { class: 't-city', text: S.trip.city || S.trip.tripName || CO.nameKo }),
-    h('div', { class: 't-quote', text: quoteOfDay(date) }),
+    h('div', { class: 't-top' }, [
+      h('div', { style: 'min-width:0' }, [
+        h('div', { class: 't-date', text: fmtDateFull(date) }),
+        h('div', { class: 't-city', text: S.trip.city || S.trip.tripName || CO.nameKo })
+      ]),
+      h('div', { class: 't-clock' }, [
+        h('div', { class: 't-time' }, [
+          h('span', { id: 'heroClock', text: pad2(p.hh) + ':' + pad2(p.mm) }),
+          h('span', { class: 't-sec', id: 'heroSec', text: pad2(p.ss) })
+        ]),
+        h('div', { class: 't-tz', text: CO.nameKo + ' 시간' })
+      ])
+    ]),
+    h('div', { class: 'hero-weather', id: 'heroWeather' }),
     dday ? h('div', { class: 't-dday', text: dday }) : null
   ]));
 
@@ -2287,6 +2500,11 @@ function renderToday() {
   nodes.push(emg);
 
   mount(view, nodes.filter(Boolean));
+
+  // 히어로의 날씨 · 시계 채우기 (화면을 다시 그린 뒤여야 합니다)
+  paintWeather();
+  paintClock();
+  refreshWeather(false);
 }
 
 /* =========================================================================
@@ -4608,8 +4826,49 @@ function aiParseError(status, bodyText) {
   if (status === 401 || gstatus === 'UNAUTHENTICATED') {
     return { fatal: true, message: '인증에 실패했습니다. API 키를 다시 넣어주세요.' };
   }
-  // 그 외(모델 없음 404, 사용량 초과 429, 일시 오류 500/503 등)는 다음 모델로 넘어갑니다.
+  if (status === 429 || gstatus === 'RESOURCE_EXHAUSTED') {
+    // "limit: 0" 은 이 키에 애초에 쓸 수 있는 양이 없다는 뜻입니다.
+    // 모델을 바꿔도 똑같이 막히므로 즉시 멈춥니다.
+    if (/limit:\s*0\b/.test(bodyText)) return { fatal: true, noQuota: true, message: AI_NO_QUOTA_MSG };
+    const wait = String(bodyText).match(/retry in ([0-9.]+)s/i);
+    return {
+      fatal: false, retryable: true,
+      retryAfter: wait ? Math.ceil(parseFloat(wait[1])) : 0,
+      message: '사용량이 잠시 가득 찼습니다' + (wait ? ' (약 ' + Math.ceil(parseFloat(wait[1])) + '초 뒤 가능)' : '')
+    };
+  }
+  if (/no longer available|is deprecated|has been (deprecated|retired)/i.test(message)) {
+    return { fatal: false, retired: true, message: '이제 새로 쓸 수 없는 모델입니다' };
+  }
+  // 그 외(모델 없음 404, 일시 오류 500/503 등)는 다음 모델로 넘어갑니다.
   return { fatal: false, message: message || ('HTTP ' + status) };
+}
+
+/** 무료 사용량이 0으로 잡힌 키를 만났을 때 보여줄 안내 */
+const AI_NO_QUOTA_MSG =
+  '이 API 키로는 AI 를 쓸 수 없습니다. (무료 사용량이 0으로 잡혀 있습니다)\n\n' +
+  '모델을 바꿔도 똑같이 막히므로, 키를 새로 만드는 것이 가장 빠릅니다.\n\n' +
+  '[해결 방법]\n' +
+  '1. aistudio.google.com/apikey 에 접속합니다.\n' +
+  '2. [Create API key] → 프로젝트를 고르는 화면이 나오면\n' +
+  '   반드시 "Create API key in new project"(새 프로젝트) 를 고릅니다.\n' +
+  '   ← 기존 Google Cloud 프로젝트에 만든 키는 무료 사용량이 0인 경우가 많습니다.\n' +
+  '3. 새 키를 넣고(스크립트 속성 GEMINI_API_KEY) 다시 배포합니다.\n\n' +
+  '그래도 0 이라면 그 프로젝트는 무료 사용량 대상이 아닙니다.\n' +
+  'Google Cloud 콘솔에서 결제를 연결하면 유료로 쓸 수 있습니다.';
+
+/** 여러 모델이 같은 이유로 막혔을 때 한 줄로 묶습니다 */
+function aiSummarizeErrors(errors) {
+  const groups = {}, order = [];
+  (errors || []).forEach(line => {
+    const at = String(line).indexOf(': ');
+    const model = at > 0 ? String(line).slice(0, at) : '';
+    let why = at > 0 ? String(line).slice(at + 2) : String(line);
+    why = why.split('\n')[0].slice(0, 160).replace(/\s+$/, '');
+    if (!groups[why]) { groups[why] = []; order.push(why); }
+    groups[why].push(model);
+  });
+  return order.map(w => '· ' + w + '\n  (' + groups[w].join(', ') + ')').join('\n');
 }
 
 /**
@@ -4624,7 +4883,31 @@ async function aiGenerate(userText) {
   if (aiUseServer()) return aiGenerateViaServer(userText, models);
 
   // 서버에 키가 없을 때만 이 기기에 저장한 개인 키로 직접 부릅니다.
-  return aiGenerateDirect(userText, models);
+  // 없는 이름은 두드려 보지도 않도록, 실제 쓸 수 있는 목록을 먼저 확인합니다.
+  let usable = models;
+  try {
+    const avail = await aiListModelsCached();
+    if (avail.length) {
+      const kept = models.filter(m => avail.indexOf(m) >= 0);
+      usable = kept.length ? kept : aiPickModels(avail, models);
+    }
+  } catch (e) { /* 목록을 못 받으면 적어둔 대로 시도합니다 */ }
+  if (!usable.length) usable = models;
+
+  const out = await aiGenerateDirect(userText, usable);
+  if (models.indexOf(out.model) < 0) out.autoPicked = true;
+  return out;
+}
+
+/** 모델 목록을 30분 동안 기억해 둡니다 (매번 물어보지 않도록) */
+let aiModelListCache = null;
+async function aiListModelsCached() {
+  if (aiModelListCache && Date.now() - aiModelListCache.at < 30 * 60000) {
+    return aiModelListCache.list;
+  }
+  const list = await aiListModels();
+  aiModelListCache = { at: Date.now(), list: list };
+  return list;
 }
 
 /**
@@ -4659,7 +4942,7 @@ async function aiGenerateViaServer(userText, models) {
       e.detail = err.message;
       throw e;
     }
-    if (code === 'AI_KEY_ERROR') {
+    if (code === 'AI_KEY_ERROR' || code === 'AI_NO_QUOTA') {
       const e = new Error('AI_FATAL');
       e.detail = err.message;
       throw e;
@@ -4741,7 +5024,7 @@ async function aiGenerateDirect(userText, models, isRetry) {
         if (res.status === 404 || /not found|NOT_FOUND|is not supported/i.test(textBody)) sawNotFound = true;
         const info = aiParseError(res.status, textBody);
         if (info.fatal) {
-          // 키 문제 등은 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
+          // 키 · 사용량 문제는 다른 모델을 시도해도 똑같이 실패하므로 즉시 멈춥니다.
           const fatal = new Error('AI_FATAL');
           fatal.detail = info.message;
           throw fatal;
@@ -4799,7 +5082,7 @@ async function aiGenerateDirect(userText, models, isRetry) {
   }
 
   const err = new Error('AI_FAILED');
-  err.detail = errors.join('\n') || '알 수 없는 이유로 답을 받지 못했습니다.';
+  err.detail = aiSummarizeErrors(errors) || '알 수 없는 이유로 답을 받지 못했습니다.';
   throw err;
 }
 
@@ -4812,12 +5095,14 @@ function aiPickModels(available, wanted) {
   const score = name => {
     let s = 0;
     if (/^gemini-/.test(name)) s += 100;
+    // "-latest" 는 구글이 이름을 바꿔도 그대로라서 가장 안전합니다.
+    if (/-latest$/.test(name)) s += 60;
     if (/flash/i.test(name)) s += 40;
     if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
     if (/pro/i.test(name)) s += 10;
     const v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
     if (v) s += (Number(v[1]) || 0) * 6 + (Number(v[2]) || 0);
-    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma/i.test(name)) s -= 80;
+    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma|live|native/i.test(name)) s -= 80;
     if (/\d{3,}/.test(name)) s -= 15;
     return s;
   };
@@ -5325,11 +5610,19 @@ function bindGlobalEvents() {
 
   // 앱으로 돌아왔을 때 자동 재조회
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && S.token && S.booted) silentRefresh();
+    if (document.visibilityState === 'visible' && S.token && S.booted) {
+      silentRefresh();
+      refreshWeather(false);
+      paintClock();
+    }
   });
 
   // 1분마다 '오늘' 화면의 남은 시간 갱신
   setInterval(() => { if (S.tab === 'today' && S.booted) renderToday(); }, 60000);
+  // 시계는 화면 전체를 다시 그리지 않고 글자만 바꿔 1초마다 움직입니다.
+  setInterval(() => { if (S.tab === 'today') paintClock(); }, 1000);
+  // 날씨는 정해진 간격마다 새로 받아옵니다.
+  setInterval(() => { if (S.booted) refreshWeather(false); }, 5 * 60000);
 }
 
 /**

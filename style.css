@@ -492,6 +492,81 @@ input:focus, select:focus, textarea:focus {
   line-height: 1.65; font-style: italic;
   border-left: 2px solid var(--star); padding-left: 10px;
 }
+
+/* 날짜 · 도시 / 시계 */
+.today-hero .t-top {
+  position: relative; z-index: 1;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+}
+.today-hero .t-clock { flex: none; text-align: right; }
+.today-hero .t-time {
+  font-size: 1.72rem; font-weight: 800; line-height: 1.1;
+  letter-spacing: .01em; font-variant-numeric: tabular-nums;
+  display: flex; align-items: baseline; gap: 3px; justify-content: flex-end;
+}
+.today-hero .t-sec {
+  font-size: .84rem; font-weight: 700; color: var(--star);
+  font-variant-numeric: tabular-nums;
+}
+.today-hero .t-tz { font-size: .7rem; color: #cdc3ac; margin-top: 1px; }
+
+/* 도시별 날씨 */
+.hero-weather {
+  position: relative; z-index: 1;
+  display: flex; align-items: stretch; gap: 8px; margin-top: 14px;
+}
+.wx-chip {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(255, 255, 255, .11);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 14px; padding: 8px 10px;
+}
+.wx-chip.here {
+  background: rgba(242, 193, 78, .17);
+  border-color: rgba(242, 193, 78, .45);
+}
+.wx-chip .wx-ico { font-size: 26px; color: var(--star-soft); flex: none; }
+.wx-chip.here .wx-ico { color: var(--star); }
+.wx-body { min-width: 0; flex: 1; }
+.wx-top { display: flex; align-items: baseline; gap: 5px; }
+.wx-city {
+  font-size: .78rem; font-weight: 700; color: #f0e6cd;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wx-temp {
+  font-size: 1.08rem; font-weight: 800; margin-left: auto; flex: none;
+  font-variant-numeric: tabular-nums;
+}
+/* 설명은 두 줄까지 접어서 보여줍니다 (잘려서 "..." 로 끝나지 않도록) */
+.wx-sub {
+  font-size: .66rem; line-height: 1.35; color: #cdc3ac; margin-top: 2px;
+  word-break: keep-all;
+}
+.wx-loading { font-size: .78rem; color: #cdc3ac; padding: 6px 2px; }
+
+/* 새로고침은 히어로 오른쪽 아래 구석에 (날씨 칸 자리를 뺏지 않도록) */
+.wx-refresh {
+  position: absolute; right: 10px; bottom: 8px; z-index: 2;
+  width: 30px; height: 30px; color: #b9b0a0;
+}
+.wx-refresh .mi { font-size: 17px; }
+.wx-refresh:active { background: rgba(255,255,255,.15); }
+
+@media (max-width: 380px) {
+  .today-hero .t-time { font-size: 1.45rem; }
+  .today-hero .t-city { font-size: 1.3rem; }
+  .wx-chip { padding: 7px 8px; gap: 6px; }
+  .wx-chip .wx-ico { font-size: 22px; }
+  .wx-sub { font-size: .62rem; }
+}
+/* 넓은 화면에서는 날씨 칸이 끝없이 늘어나지 않게 합니다 */
+@media (min-width: 620px) {
+  .hero-weather { justify-content: flex-start; }
+  .wx-chip { flex: 0 1 230px; }
+  .wx-sub { font-size: .7rem; }
+}
+
 .today-hero .t-dday {
   display: inline-block; margin-top: 12px;
   background: rgba(255,255,255,.13); border-radius: 999px;

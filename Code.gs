@@ -1590,15 +1590,23 @@ function logActivity_(nickname, action, target, detail) {
  * ========================================================== */
 
 /** 스크립트 속성에 모델 순서가 없을 때 쓰는 기본값 */
+/*
+ * 앱은 먼저 "이 키로 실제 쓸 수 있는 모델 목록"을 확인한 뒤,
+ * 아래 목록 중 존재하는 것만 순서대로 시도합니다.
+ * 없는 이름은 두드려 보지도 않으므로 그냥 적어두어도 손해가 없습니다.
+ *
+ * "-latest" 로 끝나는 이름은 구글이 모델 이름을 바꿔도 그대로 남기 때문에
+ * 가장 안전합니다. 그래서 맨 앞에 두었습니다.
+ */
 var AI_DEFAULT_MODELS_ = [
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash',
-  'gemini-3.6-flash',
-  'gemini-2.5-flash-lite',
-  // ↓ 위 이름들이 아직 없을 때를 대비한 안전망 (지금 실제로 있는 이름들)
+  'gemini-flash-lite-latest',   // 이름이 바뀌어도 계속 동작
+  'gemini-flash-latest',
   'gemini-2.5-flash',
-  'gemini-2.0-flash'
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash',
+  // ↓ 아직 없는 이름들. 나중에 생기면 자동으로 먼저 쓰이게 됩니다.
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite'
 ];
 
 var AI_BASE_DEFAULT_ = 'https://generativelanguage.googleapis.com/v1beta';
@@ -1664,8 +1672,45 @@ function aiClassifyError_(status, bodyText) {
                '키에 걸어둔 사용 제한이 이 스크립트를 막고 있지 않은지 확인해 주세요.'
     };
   }
+
+  // ---- 사용량(할당량) 문제 ----
+  if (status === 429 || gstatus === 'RESOURCE_EXHAUSTED') {
+    // "limit: 0" 은 "잠깐 많이 썼다"가 아니라
+    // "이 키에는 애초에 쓸 수 있는 양이 없다"는 뜻입니다.
+    // 다른 모델로 바꿔도 똑같이 막히므로 즉시 멈춥니다.
+    if (/limit:\s*0\b/.test(bodyText)) {
+      return { fatal: true, noQuota: true, message: AI_NO_QUOTA_MSG_ };
+    }
+    var wait = bodyText.match(/retry in ([0-9.]+)s/i);
+    return {
+      fatal: false, retryable: true,
+      retryAfter: wait ? Math.ceil(parseFloat(wait[1])) : 0,
+      message: '사용량이 잠시 가득 찼습니다' + (wait ? ' (약 ' + Math.ceil(parseFloat(wait[1])) + '초 뒤 가능)' : '')
+    };
+  }
+
+  // ---- 더 이상 새로 쓸 수 없는(퇴역한) 모델 ----
+  if (/no longer available|is deprecated|has been (deprecated|retired)/i.test(msg)) {
+    return { fatal: false, retired: true, message: '이제 새로 쓸 수 없는 모델입니다' };
+  }
+
   return { fatal: false, message: msg || ('HTTP ' + status) };
 }
+
+/** 무료 사용량이 0으로 잡힌 키를 만났을 때 보여줄 안내 */
+var AI_NO_QUOTA_MSG_ =
+  '이 API 키로는 AI 를 쓸 수 없습니다. (무료 사용량이 0으로 잡혀 있습니다)\n\n' +
+  '모델을 바꿔도 똑같이 막히므로, 키를 새로 만드는 것이 가장 빠릅니다.\n\n' +
+  '[해결 방법]\n' +
+  '1. https://aistudio.google.com/apikey 에 접속합니다.\n' +
+  '2. [Create API key] → 프로젝트를 고르는 화면이 나오면\n' +
+  '   반드시 "Create API key in new project"(새 프로젝트) 를 고릅니다.\n' +
+  '   ← 기존 Google Cloud 프로젝트에 만든 키는 무료 사용량이 0인 경우가 많습니다.\n' +
+  '3. 새로 만든 AIza... 키를 Apps Script 의\n' +
+  '   [프로젝트 설정 > 스크립트 속성] 의 GEMINI_API_KEY 값에 덮어씁니다.\n' +
+  '4. [배포 > 배포 관리 > ✏️ > 새 버전 > 배포] 로 다시 배포합니다.\n\n' +
+  '그래도 0 이라면 그 프로젝트는 무료 사용량 대상이 아닙니다.\n' +
+  'Google Cloud 콘솔에서 결제를 연결하면 유료로 쓸 수 있습니다.';
 
 /**
  * AI 답변 요청. 키는 서버에만 있고 응답에도 포함하지 않습니다.
@@ -1704,41 +1749,146 @@ function apiAiChat_(req, ctx) {
   var maxTokens = Math.min(Math.max(parseInt(req.maxOutputTokens, 10) || 1400, 128), 8192);
 
   var opts = { system: system, useSearch: useSearch, maxTokens: maxTokens };
-  var run = aiRunModels_(key, models, contents, opts);
-  if (run.fatal) return fail_('AI_KEY_ERROR', run.fatal);
-  if (run.result) return ok_(run.result, '');
 
-  // ---- 적어둔 모델 이름이 전부 "없는 모델" 이었다면 ----
-  // 구글이 이름을 바꾼 것입니다. 실제 쓸 수 있는 목록을 받아와 자동으로 다시 시도합니다.
-  if (run.sawNotFound) {
-    var avail = aiFetchModelList_(key);
-    if (avail.length) {
-      var retry = aiPickModels_(avail, models);
-      // 이미 실패한 이름은 빼고
-      var fresh = [];
-      for (var r = 0; r < retry.length; r++) {
-        if (models.indexOf(retry[r]) < 0) fresh.push(retry[r]);
+  // ---- 실제로 쓸 수 있는 모델만 남깁니다 ----
+  // AI Studio 는 모델 이름을 자주 바꾸므로, 지금 이 키로 부를 수 있는 목록을
+  // 먼저 확인해서 없는 이름은 아예 두드리지 않습니다. (30분 동안 기억합니다)
+  var avail = aiCachedModelList_(key);
+  var tried = models;
+  if (avail.length) {
+    tried = aiFilterAvailable_(models, avail);
+    if (!tried.length) {
+      // 적어둔 이름이 전부 없는 이름 → 실제 목록에서 알맞은 것으로 대신합니다.
+      tried = aiPickModels_(avail, models);
+    }
+  }
+  if (!tried.length) tried = models;
+  tried = aiDropRetired_(tried);
+  if (!tried.length) tried = models;
+
+  var run = aiRunModels_(key, tried, contents, opts);
+  aiRememberRetired_(run.retired);
+
+  if (run.noQuota) return fail_('AI_NO_QUOTA', run.fatal);
+  if (run.fatal) return fail_('AI_KEY_ERROR', run.fatal);
+  if (run.result) {
+    // 적어둔 목록에 없던 모델이 대신 답한 경우에만 알려줍니다.
+    if (models.indexOf(run.result.model) < 0) {
+      run.result.autoPicked = true;
+      return ok_(run.result, '적어둔 모델 대신 ' + run.result.model + ' 로 답했습니다.');
+    }
+    return ok_(run.result, '');
+  }
+
+  // ---- 여기까지 왔다면 목록을 새로 받아 한 번 더 시도합니다 ----
+  var fresh = aiFetchModelList_(key);
+  if (fresh.length) {
+    aiPutModelList_(fresh);
+    var retry = aiDropRetired_(aiPickModels_(fresh, models));
+    var todo = [];
+    for (var r = 0; r < retry.length; r++) {
+      if (tried.indexOf(retry[r]) < 0) todo.push(retry[r]);
+    }
+    if (todo.length) {
+      var run2 = aiRunModels_(key, todo, contents, opts);
+      aiRememberRetired_(run2.retired);
+      if (run2.noQuota) return fail_('AI_NO_QUOTA', run2.fatal);
+      if (run2.fatal) return fail_('AI_KEY_ERROR', run2.fatal);
+      if (run2.result) {
+        run2.result.autoPicked = true;
+        return ok_(run2.result, '적어둔 모델 대신 ' + run2.result.model + ' 로 답했습니다.');
       }
-      if (fresh.length) {
-        var run2 = aiRunModels_(key, fresh, contents, opts);
-        if (run2.fatal) return fail_('AI_KEY_ERROR', run2.fatal);
-        if (run2.result) {
-          run2.result.autoPicked = true;
-          run2.result.available = avail;
-          return ok_(run2.result, '적어둔 모델 이름이 맞지 않아 ' + run2.result.model + ' 로 답했습니다.');
-        }
-        run.errors = run.errors.concat(run2.errors);
-      }
-      return fail_('AI_NO_SUCH_MODEL',
-        '적어둔 모델 이름을 하나도 찾을 수 없습니다.\n' +
-        '지금 이 키로 쓸 수 있는 모델: ' + avail.slice(0, 8).join(', ') +
-        '\n[AI 설정] → [사용 가능한 모델 불러오기] 에서 골라주세요.\n\n' +
-        run.errors.join('\n'));
+      run.errors = run.errors.concat(run2.errors);
     }
   }
 
   return fail_('AI_FAILED',
-    '모든 모델을 시도했지만 답을 받지 못했습니다.\n' + run.errors.join('\n'));
+    '지금은 답을 받을 수 없습니다.\n\n' + aiSummarizeErrors_(run.errors) +
+    (fresh.length ? '\n\n이 키로 쓸 수 있는 모델: ' + fresh.join(', ') : ''));
+}
+
+/**
+ * 여러 모델이 같은 이유로 실패했을 때 한 줄로 묶어 보여줍니다.
+ * (같은 문장이 열 번 반복되어 읽기 힘든 것을 막습니다)
+ */
+function aiSummarizeErrors_(errors) {
+  var groups = {};
+  var order = [];
+  for (var i = 0; i < errors.length; i++) {
+    var line = String(errors[i]);
+    var at = line.indexOf(': ');
+    var model = at > 0 ? line.substring(0, at) : '';
+    var why = at > 0 ? line.substring(at + 2) : line;
+    // 너무 긴 설명은 첫 문장만 씁니다.
+    why = why.split('\n')[0].substring(0, 160).replace(/\s+$/, '');
+    if (!groups[why]) { groups[why] = []; order.push(why); }
+    groups[why].push(model);
+  }
+  var out = [];
+  for (var k = 0; k < order.length; k++) {
+    var why2 = order[k];
+    var list = groups[why2];
+    out.push('· ' + why2 + '\n  (' + list.join(', ') + ')');
+  }
+  return out.join('\n');
+}
+
+/** 적어둔 이름 중 실제로 존재하는 것만 남깁니다 */
+function aiFilterAvailable_(models, available) {
+  var have = {};
+  for (var i = 0; i < available.length; i++) have[available[i]] = 1;
+  var out = [];
+  for (var j = 0; j < models.length; j++) {
+    if (have[models[j]]) out.push(models[j]);
+  }
+  return out;
+}
+
+/* ---- 모델 목록 기억해 두기 (30분) ---- */
+
+function aiCachedModelList_(key) {
+  try {
+    var v = CacheService.getScriptCache().get('aiModelList');
+    if (v) return JSON.parse(v);
+  } catch (e) { /* 무시 */ }
+  var fresh = aiFetchModelList_(key);
+  if (fresh.length) aiPutModelList_(fresh);
+  return fresh;
+}
+
+function aiPutModelList_(list) {
+  try { CacheService.getScriptCache().put('aiModelList', JSON.stringify(list), 1800); }
+  catch (e) { /* 무시 */ }
+}
+
+/* ---- "이제 못 쓰는 모델" 기억해 두기 (하루) ---- */
+
+function aiRetiredModels_() {
+  try {
+    var v = CacheService.getScriptCache().get('aiRetired');
+    if (v) return JSON.parse(v);
+  } catch (e) { /* 무시 */ }
+  return [];
+}
+
+function aiRememberRetired_(list) {
+  if (!list || !list.length) return;
+  var cur = aiRetiredModels_();
+  for (var i = 0; i < list.length; i++) {
+    if (cur.indexOf(list[i]) < 0) cur.push(list[i]);
+  }
+  try { CacheService.getScriptCache().put('aiRetired', JSON.stringify(cur), 21600); }
+  catch (e) { /* 무시 */ }
+}
+
+function aiDropRetired_(models) {
+  var bad = aiRetiredModels_();
+  if (!bad.length) return models;
+  var out = [];
+  for (var i = 0; i < models.length; i++) {
+    if (bad.indexOf(models[i]) < 0) out.push(models[i]);
+  }
+  return out;
 }
 
 /**
@@ -1749,6 +1899,7 @@ function aiRunModels_(key, models, contents, opts) {
   var base = aiBase_();
   var errors = [];
   var sawNotFound = false;
+  var retired = [];
 
   for (var mi = 0; mi < models.length; mi++) {
     var model = models[mi];
@@ -1786,8 +1937,22 @@ function aiRunModels_(key, models, contents, opts) {
         // 검색 도구를 지원하지 않는 모델이면 도구 없이 다시 시도
         if (tries[t] && /tool|google_search|function|Search Grounding/i.test(body)) continue;
         if (code === 404 || /not found|NOT_FOUND|is not supported/i.test(body)) sawNotFound = true;
+
         var info = aiClassifyError_(code, body);
-        if (info.fatal) return { result: null, errors: errors, fatal: info.message, sawNotFound: sawNotFound };
+        if (info.fatal) {
+          return {
+            result: null, errors: errors, fatal: info.message,
+            noQuota: !!info.noQuota, sawNotFound: sawNotFound, retired: retired
+          };
+        }
+        if (info.retired) retired.push(model);
+        if (info.retryable && info.retryAfter && info.retryAfter <= 20 && !opts._waited) {
+          // 잠깐 기다리면 되는 경우에는 한 번만 쉬었다가 같은 모델로 다시 해봅니다.
+          opts._waited = true;
+          Utilities.sleep(Math.min(info.retryAfter, 20) * 1000 + 500);
+          t--;
+          continue;
+        }
         errors.push(model + ': ' + info.message);
         break;
       }
@@ -1825,12 +1990,12 @@ function aiRunModels_(key, models, contents, opts) {
           total: models.length,
           grounded: !!(cand.groundingMetadata || cand.grounding_metadata)
         },
-        errors: errors, fatal: '', sawNotFound: sawNotFound
+        errors: errors, fatal: '', sawNotFound: sawNotFound, retired: retired
       };
     }
   }
 
-  return { result: null, errors: errors, fatal: '', sawNotFound: sawNotFound };
+  return { result: null, errors: errors, fatal: '', sawNotFound: sawNotFound, retired: retired };
 }
 
 /** 실제 쓸 수 있는 모델 이름만 받아옵니다 (실패하면 빈 배열) */
@@ -1866,6 +2031,8 @@ function aiPickModels_(available, wanted) {
   function score(name) {
     var s = 0;
     if (/^gemini-/.test(name)) s += 100;
+    // "-latest" 는 구글이 모델 이름을 바꿔도 그대로라서 가장 안전합니다.
+    if (/-latest$/.test(name)) s += 60;
     if (/flash/i.test(name)) s += 40;
     if (/lite/i.test(name)) s += (wantLite ? 25 : 5);
     if (/pro/i.test(name)) s += 10;
@@ -1873,7 +2040,7 @@ function aiPickModels_(available, wanted) {
     var v = name.match(/gemini-(\d+)(?:\.(\d+))?/);
     if (v) s += (parseInt(v[1], 10) || 0) * 6 + (parseInt(v[2], 10) || 0);
     // 실험판·미리보기·특수 목적은 뒤로
-    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma/i.test(name)) s -= 80;
+    if (/exp|preview|thinking|image|tts|audio|embedding|vision|learnlm|gemma|live|native/i.test(name)) s -= 80;
     if (/\d{3,}/.test(name)) s -= 15;   // 날짜가 붙은 고정 버전(-001, -20250219 등)
     return s;
   }
